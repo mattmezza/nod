@@ -17,15 +17,18 @@ notifications.
 - Stacked notifications, configurable corner
 - Per-urgency colors and timeouts
 - Click to dismiss / invoke `"default"` action
-- `~800` lines of C99
+- X resources theming with runtime reload
+- Optional rounded corners via the X Shape extension
+- Xft font rendering with fontconfig emoji fallback
+- `~900` lines of C99
 
 ## Requirements
 
-- libX11, libXft, libXrandr
+- libX11, libXft, libXrandr, libXext
 - libdbus-1
 - a running X session
 
-On Arch: `pacman -S libx11 libxft libxrandr dbus`
+On Arch: `pacman -S libx11 libxft libxrandr libxext dbus`
 
 ## Build
 
@@ -35,6 +38,38 @@ sudo make install
 ```
 
 Edit `config.def.h` then `make clean && make` to reconfigure.
+`border_radius` sets rounded corners via the X Shape extension (`0` = square).
+
+## Theming via X resources
+
+Set `use_xresources = 1` in `config.h` to read colors and font from
+X resources at startup. Any unset resource falls back to the compiled-in
+default.
+
+Example `~/.Xresources`:
+
+```
+nod.font:              Noto Sans:size=10
+nod.background.low:    #1d2021
+nod.background.normal: #1d2021
+nod.background.critical: #cc241d
+nod.foreground.low:    #928374
+nod.foreground.normal: #ebdbb2
+nod.foreground.critical: #1d2021
+nod.border.low:        #928374
+nod.border.normal:     #458588
+nod.border.critical:   #cc241d
+```
+
+Load with `xrdb -merge ~/.Xresources` before starting `nod`.
+
+`nod` polls the X resource database every `xresources_poll_ms` milliseconds
+(default 5000) and reloads colors/font automatically when it changes.
+Set `xresources_poll_ms = 0` to disable polling and use `SIGUSR1` instead:
+
+```sh
+killall -USR1 nod
+```
 
 ## Run
 
@@ -89,6 +124,12 @@ gdbus call --session \
     --method org.freedesktop.Notifications.Notify \
     "test" 0 "" "Click me" "Has default action" \
     '["default", "Open"]' '{}' -1
+```
+
+There is also an isolated Xephyr test for X resources reload:
+
+```sh
+./tests/test_xresources.sh
 ```
 
 ## Interaction
