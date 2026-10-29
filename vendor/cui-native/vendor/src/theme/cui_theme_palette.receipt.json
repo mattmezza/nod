@@ -1,0 +1,12 @@
+{
+  "source_commit": "87d10ae5e1299d1be18670a37570c5402f952e34",
+  "source_path": "crates/component/src/theme/default-colors.json",
+  "source_sha256": "287a67753d98f68f7b36611e478adc26762ed3c5678d0e4bda132c5ea832046f",
+  "derived_file": "src/theme/cui_theme_palette.inc",
+  "derived_sha256": "acfaa85ed934d3cbe3a35860e6203bdd9baf88c299920d403707ee7a2328eca8",
+  "families": 22,
+  "entries": 242,
+  "license": "Apache-2.0",
+  "license_notice": "third_party/gpui_themes/LICENSE",
+  "generation": "Copy each list entry scale and hex RGB verbatim into fixed palette records; alpha255. No color transformation."
+}

@@ -1,4 +1,4 @@
-.Dd April 14, 2026
+.Dd October 29, 2026
 .Dt NOD 1
 .Os
 .Sh NAME
@@ -17,8 +17,9 @@ and any application that emits standard notifications.
 .Nm
 claims the well-known name
 .Pa org.freedesktop.Notifications
-on the session bus and displays notifications as override-redirect
-X11 windows rendered with Xft.
+on the session bus and displays notifications as cards in a single
+override-redirect X11 window, laid out and painted by the CUI library
+through its SDL3 renderer.
 Only one notification daemon can own that name at a time.
 .Pp
 Configuration is compile-time only: edit
@@ -30,13 +31,25 @@ and rebuild.
 Print version and exit.
 .El
 .Sh INTERACTION
-.Bl -tag -width "Left-click "
-.It Sy Left-click
-Invoke the
+.Bl -tag -width "Action button "
+.It Sy Stack
+Several notifications fold into a deck, newest in front;
+hovering unfolds it into a list.
+.It Sy Action button
+One button per action (up to three); clicking it emits
+.Sy ActionInvoked
+with that key, then dismisses.
+With
+.Sy action_buttons
+off, a left click on the card invokes the
 .Dq default
-action if the notification registered one, then dismiss.
-.It Sy Right-click
-Dismiss only. Never invoke action.
+action (or the first one).
+.It Sy Dismiss
+Dismiss without invoking any action.
+Right-clicking a card, or swiping it towards the screen edge
+(mouse drag or two-finger touchpad swipe), does the same.
+.It Sy Hover
+Timeouts are held while the pointer is over the stack.
 .It Sy Timeout
 Auto-dismiss after the notification's expire time.
 .El
@@ -79,12 +92,26 @@ Reload colors and font from X resources.
 .Sh FILES
 .Bl -tag -width "config.def.h "
 .It Pa config.h
-Per-user appearance, timeouts, position, stacking, and corner radius.
+Per-user appearance, card parts (app name, urgency, time, dividers,
+buttons, border), stacking, motion, timeouts and position.
 Copied from
 .Pa config.def.h
 on first build.
-Rounded corners use the X Shape extension when available.
 .El
+.Sh COMPOSITING
+With a compositor running,
+.Nm
+uses a 32-bit window with real transparency and antialiased corners;
+without one it shapes the window with the X Shape extension.
+The window has class
+.Dq nod
+and type
+.Sy _NET_WM_WINDOW_TYPE_NOTIFICATION .
+Compositors that blur or round windows should exclude it, e.g.\& for picom:
+.Bd -literal -offset indent
+blur-background-exclude = [ "class_g = 'nod'" ];
+rounded-corners-exclude = [ "class_g = 'nod'" ];
+.Ed
 .Sh X RESOURCES
 When
 .Sy use_xresources
@@ -96,20 +123,39 @@ Unset resources fall back to the compiled-in defaults from
 .Pa config.h .
 .Bl -tag -width "nod.background.critical "
 .It Sy nod.font
-Font pattern passed to Xft, e.g.\& Li monospace:size=10 .
-.It Sy nod.background.low
-.It Sy nod.background.normal
-.It Sy nod.background.critical
-Background color per urgency.
-.It Sy nod.foreground.low
-.It Sy nod.foreground.normal
-.It Sy nod.foreground.critical
-Foreground color per urgency.
-.It Sy nod.border.low
-.It Sy nod.border.normal
-.It Sy nod.border.critical
-Border color per urgency.
+Fontconfig pattern for text, e.g.\& Li Noto Sans:size=11 .
+.It Sy nod.monoFont
+Fontconfig pattern for the header and time.
+.It Sy nod.background Ns Op .urgency
+Card background; falls back to
+.Sy *.background .
+.It Sy nod.foreground Ns Op .urgency
+Text color; falls back to
+.Sy *.foreground .
+.It Sy nod.accent.urgency
+Border, dot and button color.
+Falls back to
+.Sy nod.border.urgency ,
+then
+.Sy *.color8 ,
+.Sy *.color4
+and
+.Sy *.color1
+for low, normal and critical.
+.It Sy nod.muted
+Secondary text; falls back to
+.Sy *.color8 .
 .El
+.Pp
+.Ar urgency
+is one of
+.Sy low ,
+.Sy normal ,
+.Sy critical .
+Because of the fallbacks, a palette generated from the wallpaper
+(pywal, wallust, ...) themes
+.Nm
+without any nod-specific entries.
 .Pp
 When
 .Sy use_xresources
@@ -125,11 +171,10 @@ to force a reload.
 Example
 .Pa ~/.Xresources :
 .Bd -literal -offset indent
-nod.font:              Noto Sans:size=10
-nod.background.normal: #1d2021
-nod.foreground.normal: #ebdbb2
-nod.border.normal:     #458588
-nod.border.critical:   #cc241d
+nod.font:              Noto Sans:size=11
+nod.monoFont:          JetBrains Mono:size=10
+nod.accent.normal:     #458588
+nod.accent.critical:   #cc241d
 .Ed
 .Sh EXAMPLES
 Start from
@@ -146,6 +191,6 @@ exec dwm
 .Sh AUTHORS
 .An Matteo Merola
 .Sh BUGS
-Only one default action is respected;
-other action keys are ignored.
+At most three actions are shown.
 No icon, sound, or markup support by design.
+Requires SDL's X11 video driver (no native Wayland).

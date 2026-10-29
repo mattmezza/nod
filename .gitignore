@@ -24,3 +24,4 @@ compile_commands.json
 
 # release tarballs
 nod-*.tar.gz
+build/

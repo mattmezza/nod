@@ -1,0 +1,310 @@
+{
+  "modules": {
+    "cui_label": [
+      "src/components/cui_label.c"
+    ],
+    "cui_text_match": [],
+    "cui_regex": [],
+    "cui_button_group": [
+      "src/base/cui_button_group.c"
+    ],
+    "cui_plot_motion": [
+      "src/components/cui_plot_motion.c"
+    ],
+    "cui_radio_group": [
+      "src/base/cui_radio_group.c",
+      "src/components/cui_radio_group.c"
+    ],
+    "cui_plot_view": [
+      "src/components/cui_plot.c"
+    ],
+    "cui_editor": [
+      "src/base/cui_editor.c",
+      "src/components/cui_editor.c"
+    ],
+    "cui_virtual_scroll": [
+      "src/base/cui_virtual_scroll.c",
+      "src/components/cui_virtual.c"
+    ],
+    "cui_effects": [
+      "src/effects/cui_effects.c"
+    ],
+    "cui_questionnaire": [
+      "src/base/cui_questionnaire.c",
+      "src/components/cui_questionnaire.c",
+      "src/components/cui_questionnaire_presentation.c"
+    ],
+    "cui_speech": [
+      "src/base/cui_speech.c",
+      "src/components/cui_speech.c"
+    ],
+    "cui_chart": [
+      "src/base/cui_chart.c",
+      "src/components/cui_chart.c"
+    ],
+    "cui_text_view": [
+      "src/base/cui_text_view.c",
+      "src/components/cui_text_view.c"
+    ],
+    "cui_root": [
+      "src/base/cui_root.c",
+      "src/components/cui_root.c"
+    ],
+    "cui_command": [
+      "src/base/cui_command.c",
+      "src/components/cui_command.c"
+    ],
+    "cui_carousel": [
+      "src/base/cui_carousel.c",
+      "src/components/cui_carousel.c"
+    ],
+    "cui_settings": [
+      "src/base/cui_settings.c",
+      "src/components/cui_settings.c"
+    ],
+    "cui_sidebar": [
+      "src/base/cui_sidebar.c",
+      "src/components/cui_sidebar.c"
+    ],
+    "cui_textarea": [
+      "src/base/cui_textarea.c",
+      "src/components/cui_textarea.c"
+    ],
+    "cui_toolbar": [
+      "src/base/cui_toolbar.c",
+      "src/components/cui_toolbar.c"
+    ],
+    "cui_icon": [
+      "src/base/cui_icon.c",
+      "src/components/cui_icon.c"
+    ],
+    "cui_resizable": [
+      "src/base/cui_resizable.c",
+      "src/components/cui_resizable.c"
+    ],
+    "cui_chrome": [
+      "src/base/cui_chrome.c",
+      "src/components/cui_chrome.c"
+    ],
+    "cui_description": [
+      "src/base/cui_description.c",
+      "src/components/cui_description.c"
+    ],
+    "cui_video": [
+      "src/base/cui_video.c"
+    ],
+    "cui_media": [
+      "src/base/cui_media.c",
+      "src/components/cui_media.c"
+    ],
+    "cui_message": [
+      "src/base/cui_message.c",
+      "src/components/cui_message.c"
+    ],
+    "cui_status": [
+      "src/base/cui_status.c",
+      "src/components/cui_status.c"
+    ],
+    "cui_otp": [
+      "src/base/cui_otp.c",
+      "src/components/cui_otp.c"
+    ],
+    "cui_form": [
+      "src/base/cui_form.c",
+      "src/components/cui_form.c"
+    ],
+    "cui_surface": [
+      "src/base/cui_surface.c",
+      "src/components/cui_surface.c"
+    ],
+    "cui_table": [
+      "src/base/cui_table.c",
+      "src/components/cui_table.c"
+    ],
+    "cui_scroll": [
+      "src/base/cui_scroll.c",
+      "src/components/cui_scroll.c"
+    ],
+    "cui_tree": [
+      "src/base/cui_tree.c",
+      "src/components/cui_tree.c"
+    ],
+    "cui_picker": [
+      "src/base/cui_picker.c",
+      "src/components/cui_picker.c"
+    ],
+    "cui_numeric": [
+      "src/base/cui_numeric.c",
+      "src/components/cui_numeric.c"
+    ],
+    "cui_content": [
+      "src/base/cui_content.c",
+      "src/components/cui_content.c"
+    ],
+    "cui_disclosure": [
+      "src/base/cui_disclosure.c",
+      "src/components/cui_disclosure.c"
+    ],
+    "cui_choice": [
+      "src/base/cui_choice.c",
+      "src/components/cui_choice.c"
+    ],
+    "cui_plot": [
+      "src/base/cui_plot.c"
+    ],
+    "cui": [
+      "src/core/cui.c"
+    ],
+    "cui_dock": [
+      "src/base/cui_dock.c",
+      "src/components/cui_dock.c"
+    ],
+    "cui_virtual": [
+      "src/base/cui_virtual.c"
+    ],
+    "cui_overlay": [
+      "src/base/cui_overlay.c"
+    ],
+    "cui_edit": [
+      "src/base/cui_edit.c"
+    ],
+    "cui_base": [
+      "src/base/cui_base.c",
+      "src/base/cui_models.c"
+    ],
+    "cui_theme_registry": [
+      "src/theme/cui_theme_registry.c"
+    ],
+    "cui_theme": [
+      "src/theme/cui_theme.c",
+      "src/theme/cui_theme_motion.c"
+    ],
+    "cui_components": [
+      "src/components/cui_components.c"
+    ],
+    "cui_text_overflow": [
+      "src/components/cui_text_overflow.c"
+    ],
+    "cui_responsive": [],
+    "cui_typography": [],
+    "cui_video_controls": [
+      "src/components/cui_video_controls.c"
+    ],
+    "cui_component_events": [],
+    "cui_control_events": [],
+    "cui_boolean_events": [
+      "src/base/cui_boolean_events.c"
+    ],
+    "cui_slider_events": [],
+    "cui_text_input_events": [],
+    "cui_selection_events": [],
+    "cui_multiline_events": [],
+    "cui_editor_events": [],
+    "cui_surface_events": [
+      "src/base/cui_surface_events.c",
+      "src/components/cui_surface_events.c"
+    ],
+    "cui_styled_slider_events": [
+      "src/components/cui_styled_slider_events.c"
+    ],
+    "cui_menu_events": [],
+    "cui_number_events": [
+      "src/base/cui_number_events.c"
+    ],
+    "cui_tabs_events": [
+      "src/base/cui_tabs_events.c"
+    ],
+    "cui_numeric_selection_events": [
+      "src/base/cui_numeric_selection_events.c"
+    ],
+    "cui_picker_events": [
+      "src/base/cui_picker_events.c",
+      "src/components/cui_picker_events.c"
+    ],
+    "cui_otp_events": [
+      "src/base/cui_otp_events.c"
+    ],
+    "cui_disclosure_events": [],
+    "cui_list_events": [],
+    "cui_tree_events": [],
+    "cui_table_events": [],
+    "cui_settings_events": [],
+    "cui_sidebar_events": [],
+    "cui_media_events": [],
+    "cui_form_events": [],
+    "cui_toolbar_events": [],
+    "cui_command_events": [],
+    "cui_scroll_events": [],
+    "cui_hover_events": [],
+    "cui_virtual_events": [],
+    "cui_message_events": [],
+    "cui_avatar_events": [],
+    "cui_alert_events": [],
+    "cui_button_styles": [],
+    "cui_hover_card_extended": [
+      "src/components/cui_hover_card_extended.c"
+    ],
+    "cui_kbd": [
+      "src/base/cui_kbd.c",
+      "src/components/cui_kbd.c"
+    ],
+    "cui_stepper_navigation": [
+      "src/base/cui_stepper_navigation.c",
+      "src/components/cui_stepper_navigation.c"
+    ],
+    "cui_color_entry": [
+      "src/base/cui_color_entry.c",
+      "src/components/cui_color_entry.c"
+    ],
+    "cui_calendar_presentation": [],
+    "cui_calendar_behavior": [],
+    "cui_color_hsla": [
+      "src/base/cui_color_hsla.c"
+    ],
+    "cui_color_hsla_entry": [
+      "src/base/cui_color_hsla_entry.c",
+      "src/components/cui_color_hsla_entry.c"
+    ],
+    "cui_date_picker_calendar": [],
+    "cui_questionnaire_keyboard": [],
+    "cui_questionnaire_progress": [],
+    "cui_questionnaire_presentation": [],
+    "cui_questionnaire_geometry": [],
+    "cui_questionnaire_snapshots": [
+      "src/base/cui_questionnaire_snapshots.c"
+    ],
+    "cui_date_time_picker": [
+      "src/base/cui_date_time_picker.c",
+      "src/components/cui_date_time_picker.c"
+    ],
+    "cui_date_picker_actions": [
+      "src/base/cui_date_picker_actions.c",
+      "src/components/cui_date_picker_actions.c"
+    ],
+    "cui_questionnaire_observer": [
+      "src/base/cui_questionnaire_observer.c"
+    ],
+    "cui_dropdown_button_styles": [],
+    "cui_dropdown_button_metadata": [],
+    "cui_stepper_visual": [
+      "src/components/cui_stepper_visual.c"
+    ]
+  },
+  "native": {
+    "text": [
+      "src/text/cui_text.c"
+    ],
+    "bidi": [
+      "src/text/cui_bidi.c"
+    ],
+    "sheenbidi": [
+      "third_party/sheenbidi/Source/SheenBidi.c"
+    ],
+    "sdl3": [
+      "backends/sdl3/cui_sdl3.c"
+    ],
+    "software": [
+      "backends/software/cui_software.c"
+    ]
+  }
+}

@@ -1,9 +1,14 @@
 /* nod - suckless notification daemon
  * See LICENSE file for copyright and license details.
+ *
+ * D-Bus + Xlib host; cards are laid out and painted by CUI
+ * (https://github.com/mattmezza/cui) through its SDL3 renderer, in a single
+ * override-redirect window shaped to the cards.
  */
 
 #include <errno.h>
 #include <limits.h>
+#include <math.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -12,65 +17,95 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <unistd.h>
 
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
-#include <X11/cursorfont.h>
-#include <X11/Xft/Xft.h>
 #include <X11/Xresource.h>
+#include <X11/Xutil.h>
 #include <X11/extensions/Xrandr.h>
 #include <X11/extensions/shape.h>
+#include <fontconfig/fontconfig.h>
 
+#include <SDL3/SDL.h>
 #include <dbus/dbus.h>
+
+#include "cui/cui_components.h"
+#include "cui/cui_sdl3.h"
 
 #include "config.h"
 
 #define LEN(x)       (sizeof(x) / sizeof((x)[0]))
 #define MAX_NOTIFS   32
+#define MAX_ACTIONS  3
 #define BUS_NAME     "org.freedesktop.Notifications"
 #define OBJ_PATH     "/org/freedesktop/Notifications"
 #define IFACE        "org.freedesktop.Notifications"
 
 typedef struct {
+	char *key, *label;
+} Action;
+
+typedef struct {
 	uint32_t id;
 	int      active;
-	char    *summary;
-	char    *body;
+	int      closing;         /* exit animation running; already signalled */
+	int      fresh;           /* not laid out yet */
+	char    *app, *summary, *body;
 	int      urgency;
-	int      has_default_action;
-	int      timeout_ms; /* 0 = persistent */
-	struct timespec created;
-	Window   win;
-	int      x, y, w, h;
-	char   **lines;
-	int      nlines;
-	int      summary_nlines;
+	Action   actions[MAX_ACTIONS];
+	int      nactions;
+	int      timeout_ms;      /* 0 = persistent */
+	struct timespec created;  /* ordering + "2m ago" */
+	struct timespec deadline_base; /* timeout counts from here */
+	float    h;               /* natural card height from the last layout */
+	/* animated state (window coordinates, stack-relative y) */
+	float    y, x, hcur, inset, op, cop, vis;
+	float    swipe;           /* finger/touchpad offset while swiping */
+	struct timespec swipe_t;  /* last touchpad swipe event */
+	int      exit_dir;        /* -1 / +1 */
+	cui_rect rect;            /* last painted card rectangle */
+	cui_id   bid;             /* CUI id of the card body */
 } Notif;
 
-static void layout_notif(Notif *n);
-static void draw_notif(Notif *n);
-static void reposition_all(void);
-static void set_window_shape(Window win, int w, int h, int r);
+typedef struct {
+	cui_color bg, fg, accent;
+} UrgencyColors;
 
+static const char *urgency_names[] = { "low", "normal", "critical" };
+
+/* X */
 static Display        *dpy;
 static int             screen;
 static Window          root;
-static Visual         *visual;
-static Colormap        cmap;
-static int             depth;
-static XftFont        *xfont;
-static XftFont        *xfont_bold;
-static XftColor        bg_xft[3], fg_xft[3], border_xft[3];
-static Cursor          hand_cursor = 0;
-static int             have_shape = 0;
+static int             have_shape;
+static int             argb;       /* 32-bit window under a compositor */
+static char           *xrm_last;
+static volatile sig_atomic_t reload;
 
-static const char     *orig_font;
-static const char     *orig_bg[3], *orig_fg[3], *orig_border[3];
-static char           *xrm_last = NULL;
-static volatile sig_atomic_t reload = 0;
+/* theme */
+static UrgencyColors   pal[3];
+static cui_color       muted;
+static char           *font_name, *mono_name;   /* effective fontconfig patterns */
+static double          dpi = 96;                /* Xft.dpi, as Xft would use */
 
-static DBusConnection *dbus = NULL;
+/* CUI */
+static cui_font       *ui_font;
+static float           font_px, mono_px;
+static cui_sdl3       *host;
+static cui_context    *ui;
+static cui_theme       theme;
+static SDL_Window     *sdl_win;
+static Window          xwin;
+static int             shown, dirty;
+static int             win_x, win_y, win_w, win_h;
+static float           pointer_x = -1, pointer_y = -1;
+static int             animating, expanded;
+static struct timespec last_frame, hover_t;
+static Notif          *drag;                    /* card under a primary press */
+static float           drag_x0;
+static int             dragging;
+
+static DBusConnection *dbus;
 
 static Notif           notifs[MAX_NOTIFS];
 static uint32_t        next_id = 1;
@@ -97,20 +132,27 @@ ecalloc(size_t n, size_t s)
 	return p;
 }
 
-static void *
-erealloc(void *p, size_t s)
-{
-	void *r = realloc(p, s);
-	if (!r) die("realloc: out of memory");
-	return r;
-}
-
 static char *
 estrdup(const char *s)
 {
 	char *r = strdup(s ? s : "");
 	if (!r) die("strdup: out of memory");
 	return r;
+}
+
+static long
+ms_since(const struct timespec *t)
+{
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	return (now.tv_sec - t->tv_sec) * 1000L + (now.tv_nsec - t->tv_nsec) / 1000000L;
+}
+
+static int
+newer(const Notif *a, const Notif *b)
+{
+	return a->created.tv_sec > b->created.tv_sec ||
+	       (a->created.tv_sec == b->created.tv_sec && a->created.tv_nsec > b->created.tv_nsec);
 }
 
 /* Strip HTML/pango markup. Decode basic entities. Return newly allocated. */
@@ -132,7 +174,6 @@ strip_markup(const char *in)
 			else if (!strncmp(in + i, "&quot;", 6)) { out[o++] = '"';  i += 6; }
 			else if (!strncmp(in + i, "&apos;", 6)) { out[o++] = '\''; i += 6; }
 			else if (!strncmp(in + i, "&#", 2)) {
-				/* numeric entity — skip to ; */
 				size_t j = i + 2;
 				while (j < n && in[j] != ';') j++;
 				if (j < n) i = j + 1; else out[o++] = in[i++];
@@ -148,80 +189,9 @@ strip_markup(const char *in)
 		}
 	}
 	out[o] = 0;
+	/* trim trailing newlines/spaces */
+	while (o > 0 && (out[o - 1] == '\n' || out[o - 1] == ' ')) out[--o] = 0;
 	return out;
-}
-
-static int
-text_width(XftFont *f, const char *s, int len)
-{
-	XGlyphInfo gi;
-	XftTextExtentsUtf8(dpy, f, (FcChar8 *)s, len, &gi);
-	return gi.xOff;
-}
-
-/* Greedy word-wrap. Respects '\n'. Returns array of newly-allocated strings. */
-static char **
-wrap_text(XftFont *f, const char *text, int maxw, int maxlines, int *nlines_out)
-{
-	char **lines = NULL;
-	int cap = 0, n = 0;
-	int truncated = 0;
-	const char *p = text;
-
-	while (*p) {
-		if (maxlines > 0 && n >= maxlines) { truncated = 1; break; }
-
-		while (*p == ' ') p++;
-		if (!*p) break;
-		if (*p == '\n') {
-			if (n == cap) { cap = cap ? cap * 2 : 4; lines = erealloc(lines, cap * sizeof(char *)); }
-			lines[n++] = estrdup("");
-			p++;
-			continue;
-		}
-
-		const char *eol = strchr(p, '\n');
-		int remaining = eol ? (int)(eol - p) : (int)strlen(p);
-
-		int fit = 0, last_space = -1, i;
-		for (i = 1; i <= remaining; i++) {
-			if (text_width(f, p, i) > maxw) break;
-			if (p[i - 1] == ' ') last_space = i;
-			fit = i;
-		}
-
-		int brk;
-		if (fit == remaining) brk = fit;
-		else brk = (last_space > 0) ? last_space : (fit > 0 ? fit : 1);
-
-		char *line = ecalloc(1, brk + 1);
-		memcpy(line, p, brk);
-		while (brk > 0 && line[brk - 1] == ' ') line[--brk] = 0;
-
-		if (n == cap) { cap = cap ? cap * 2 : 4; lines = erealloc(lines, cap * sizeof(char *)); }
-		lines[n++] = line;
-
-		p += brk;
-		while (*p == ' ') p++;
-		if (fit == remaining && *p == '\n') p++;
-	}
-
-	if (truncated && n > 0) {
-		char *last = lines[n - 1];
-		size_t ll = strlen(last);
-		char *nl = ecalloc(1, ll + 4);
-		memcpy(nl, last, ll);
-		strcpy(nl + ll, "...");
-		while (strlen(nl) > 3 && text_width(f, nl, strlen(nl)) > maxw) {
-			size_t sl = strlen(nl);
-			memmove(nl + sl - 4, nl + sl - 3, 4);
-		}
-		free(last);
-		lines[n - 1] = nl;
-	}
-
-	*nlines_out = n;
-	return lines;
 }
 
 /* ---------- monitor detection ---------- */
@@ -276,9 +246,8 @@ get_focused_monitor(int *mx, int *my, int *mw, int *mh)
 				break;
 			}
 		}
-		if (chosen < 0) {
+		if (chosen < 0)
 			for (int i = 0; i < nmon; i++) if (mons[i].primary) { chosen = i; break; }
-		}
 		if (chosen < 0) chosen = 0;
 		*mx = mons[chosen].x;
 		*my = mons[chosen].y;
@@ -292,22 +261,12 @@ get_focused_monitor(int *mx, int *my, int *mw, int *mh)
 	}
 }
 
-/* ---------- X init ---------- */
-
-static XftColor
-alloc_color(const char *name)
-{
-	XftColor c;
-	if (!XftColorAllocName(dpy, visual, cmap, name, &c))
-		die("cannot allocate color: %s", name);
-	return c;
-}
+/* ---------- theme: X resources ---------- */
 
 static int
 x_error_handler(Display *d, XErrorEvent *e)
 {
 	(void)d; (void)e;
-	/* Ignore X errors; they're typically on windows being torn down. */
 	return 0;
 }
 
@@ -326,153 +285,272 @@ get_resource_manager(void)
 	    && prop && actual_type == XA_STRING && actual_format == 8 && nitems > 0) {
 		ret = ecalloc(1, nitems + 1);
 		memcpy(ret, prop, nitems);
-		ret[nitems] = '\0';
 	}
 	if (prop) XFree(prop);
 	return ret;
 }
 
-static char *
-xres_get(XrmDatabase db, const char *name, const char *class)
+/* First resource found among the NULL-terminated names ("nod.x.y"). The class
+ * is derived by capitalising each component, so *.foreground, *foreground,
+ * Nod.Foreground etc. all match the way xrdb users expect. */
+static const char *
+xres(XrmDatabase db, ...)
 {
-	XrmValue value;
-	char *type;
-
-	if (db && XrmGetResource(db, name, class, &type, &value) && value.addr)
-		return value.addr;
-	return NULL;
+	va_list ap;
+	const char *name, *found = NULL;
+	va_start(ap, db);
+	while (!found && (name = va_arg(ap, const char *))) {
+		char class[128];
+		snprintf(class, sizeof(class), "%s", name);
+		for (char *p = class; *p; p++)
+			if (p == class || p[-1] == '.')
+				*p = (char)(*p >= 'a' && *p <= 'z' ? *p - 32 : *p);
+		XrmValue v;
+		char *type;
+		if (db && XrmGetResource(db, name, class, &type, &v) && v.addr && *v.addr)
+			found = v.addr;
+	}
+	va_end(ap);
+	return found;
 }
 
-static void
-xres_load(void)
+static cui_color
+parse_color(const char *spec, const char *fallback)
 {
-	if (!use_xresources)
-		return;
-
-	char *rm = get_resource_manager();
-	if (!rm)
-		return;
-
-	XrmDatabase db = XrmGetStringDatabase(rm);
-	free(rm);
-	if (!db)
-		return;
-
-	static const char *urgencies[] = { "low", "normal", "critical" };
-	static const char *urgencies_class[] = { "Low", "Normal", "Critical" };
-	char name[64], class[64];
-	char *v;
-
-	if ((v = xres_get(db, "nod.font", "Nod.Font")))
-		font = strdup(v);
-
-	for (int i = 0; i < 3; i++) {
-		snprintf(name, sizeof(name), "nod.background.%s", urgencies[i]);
-		snprintf(class, sizeof(class), "Nod.Background.%s", urgencies_class[i]);
-		if ((v = xres_get(db, name, class)))
-			bg_colors[i] = strdup(v);
-
-		snprintf(name, sizeof(name), "nod.foreground.%s", urgencies[i]);
-		snprintf(class, sizeof(class), "Nod.Foreground.%s", urgencies_class[i]);
-		if ((v = xres_get(db, name, class)))
-			fg_colors[i] = strdup(v);
-
-		snprintf(name, sizeof(name), "nod.border.%s", urgencies[i]);
-		snprintf(class, sizeof(class), "Nod.Border.%s", urgencies_class[i]);
-		if ((v = xres_get(db, name, class)))
-			border_colors[i] = strdup(v);
-	}
-
-	XrmDestroyDatabase(db);
+	XColor c;
+	Colormap cmap = DefaultColormap(dpy, screen);
+	if ((!spec || !XParseColor(dpy, cmap, spec, &c)) && !XParseColor(dpy, cmap, fallback, &c))
+		die("cannot parse color: %s", fallback);
+	return (cui_color){ c.red >> 8, c.green >> 8, c.blue >> 8, 255 };
 }
 
-static void
-theme_save_defaults(void)
+static cui_color
+mix(cui_color a, cui_color b, float t)
 {
-	orig_font = font;
-	for (int i = 0; i < 3; i++) {
-		orig_bg[i]     = bg_colors[i];
-		orig_fg[i]     = fg_colors[i];
-		orig_border[i] = border_colors[i];
-	}
+	return (cui_color){
+		(uint8_t)(a.r + (b.r - a.r) * t), (uint8_t)(a.g + (b.g - a.g) * t),
+		(uint8_t)(a.b + (b.b - a.b) * t), 255 };
 }
 
-static void
-theme_reset(void)
+static cui_color
+alpha(cui_color c, uint8_t a)
 {
-	font = orig_font;
-	for (int i = 0; i < 3; i++) {
-		bg_colors[i]     = orig_bg[i];
-		fg_colors[i]     = orig_fg[i];
-		border_colors[i] = orig_border[i];
+	c.a = a;
+	return c;
+}
+
+static float
+luminance(cui_color c)
+{
+	float v[3] = { c.r / 255.f, c.g / 255.f, c.b / 255.f };
+	for (int i = 0; i < 3; i++)
+		v[i] = v[i] <= .03928f ? v[i] / 12.92f : powf((v[i] + .055f) / 1.055f, 2.4f);
+	return .2126f * v[0] + .7152f * v[1] + .0722f * v[2];
+}
+
+static float
+contrast(cui_color a, cui_color b)
+{
+	float la = luminance(a), lb = luminance(b);
+	return la > lb ? (la + .05f) / (lb + .05f) : (lb + .05f) / (la + .05f);
+}
+
+/* Wallpaper palettes give no contrast guarantees: pull c towards fg until it
+ * is readable on bg (WCAG ratio). */
+static cui_color
+readable(cui_color c, cui_color bg, cui_color fg, float min)
+{
+	for (float t = 0; t <= 1; t += .05f) {
+		cui_color m = mix(c, fg, t);
+		if (contrast(m, bg) >= min) return m;
 	}
+	return fg;
 }
 
 static void
 theme_load(void)
 {
-	if (!use_xresources)
-		return;
-	theme_reset();
-	xres_load();
+	static const char *accent_fallback[] = { "nod.color8", "nod.color4", "nod.color1" };
+	char *rm = use_xresources ? get_resource_manager() : NULL;
+	XrmDatabase db = rm ? XrmGetStringDatabase(rm) : NULL;
+	free(rm);
+
+	for (int i = 0; i < 3; i++) {
+		char bg[64], fg[64], ac[64], bd[64];
+		snprintf(bg, sizeof(bg), "nod.background.%s", urgency_names[i]);
+		snprintf(fg, sizeof(fg), "nod.foreground.%s", urgency_names[i]);
+		snprintf(ac, sizeof(ac), "nod.accent.%s", urgency_names[i]);
+		snprintf(bd, sizeof(bd), "nod.border.%s", urgency_names[i]);
+		pal[i].bg     = parse_color(xres(db, bg, "nod.background", NULL), bg_colors[i]);
+		pal[i].fg     = parse_color(xres(db, fg, "nod.foreground", NULL), fg_colors[i]);
+		pal[i].accent = parse_color(xres(db, ac, bd, accent_fallback[i], NULL), accent_colors[i]);
+	}
+	muted = parse_color(xres(db, "nod.muted", "nod.color8", NULL), muted_color);
+
+	/* critical cards get a tinted surface so they stand out beyond the border */
+	pal[2].bg = mix(pal[2].bg, pal[2].accent, critical_tint);
+	for (int i = 0; i < 3; i++) {
+		cui_color ink = luminance(pal[i].bg) > .18f ? (cui_color){ 0, 0, 0, 255 }
+		                                            : (cui_color){ 255, 255, 255, 255 };
+		pal[i].fg     = readable(pal[i].fg, pal[i].bg, ink, min_contrast);
+		pal[i].accent = readable(pal[i].accent, pal[i].bg, pal[i].fg, min_contrast);
+	}
+	muted = readable(muted, pal[1].bg, pal[1].fg, min_contrast);
+
+	const char *d = xres(db, "Xft.dpi", NULL);
+	dpi = d && atof(d) > 0 ? atof(d) : 96;
+
+	const char *f;
+	free(font_name);
+	free(mono_name);
+	font_name = estrdup((f = xres(db, "nod.font", NULL)) ? f : font);
+	mono_name = estrdup((f = xres(db, "nod.monoFont", NULL)) ? f : mono_font);
+
+	if (db) XrmDestroyDatabase(db);
+
+	/* Only button focus/selection tokens are taken from the CUI theme. */
+	theme = cui_theme_dark();
+	theme.background = pal[1].bg;
+	theme.text       = pal[1].fg;
+	theme.muted      = muted;
+	theme.focus      = pal[1].accent;
+	theme.border     = mix(pal[1].bg, pal[1].fg, .15f);
+}
+
+/* ---------- fonts (fontconfig name -> file) ---------- */
+
+static char *
+font_file(const char *name, int bold, float *px)
+{
+	FcPattern *pat = FcNameParse((const FcChar8 *)name);
+	if (!pat) return NULL;
+	if (bold) {
+		FcPatternDel(pat, FC_WEIGHT);
+		FcPatternDel(pat, FC_STYLE);
+		FcPatternAddInteger(pat, FC_WEIGHT, FC_WEIGHT_BOLD);
+	}
+	FcPatternDel(pat, FC_DPI);
+	FcPatternAddDouble(pat, FC_DPI, dpi);
+	FcConfigSubstitute(NULL, pat, FcMatchPattern);
+	FcDefaultSubstitute(pat);
+	FcResult res;
+	FcPattern *m = FcFontMatch(NULL, pat, &res);
+	char *ret = NULL;
+	FcChar8 *file;
+	double size;
+	if (m && FcPatternGetString(m, FC_FILE, 0, &file) == FcResultMatch)
+		ret = estrdup((const char *)file);
+	if (px && FcPatternGetDouble(pat, FC_PIXEL_SIZE, 0, &size) == FcResultMatch)
+		*px = (float)size;
+	if (m) FcPatternDestroy(m);
+	FcPatternDestroy(pat);
+	return ret;
+}
+
+static cui_font *
+fonts_open(void)
+{
+	char *reg = font_file(font_name, 0, &font_px);
+	char *bold = font_file(font_name, 1, NULL);
+	char *mono = font_file(mono_name, 0, &mono_px);
+	char *monob = font_file(mono_name, 1, NULL);
+	cui_font *f = reg ? cui_font_open(reg) : NULL;
+	if (!f) die("cannot load font: %s", font_name);
+	/* missing variants silently fall back to the regular face */
+	if (bold)  cui_font_register_style(f, (cui_text_style){ .weight = CUI_TEXT_WEIGHT_BOLD }, bold);
+	if (mono)  cui_font_register_style(f, (cui_text_style){ .monospace = true }, mono);
+	if (monob) cui_font_register_style(f, (cui_text_style){ .weight = CUI_TEXT_WEIGHT_BOLD,
+	                                                        .monospace = true }, monob);
+	free(reg); free(bold); free(mono); free(monob);
+	return f;
+}
+
+/* ---------- CUI host window ---------- */
+
+static void
+host_destroy(void)
+{
+	cui_destroy(ui);
+	cui_sdl3_destroy(host);
+	cui_font_close(ui_font);
+	ui = NULL; host = NULL; ui_font = NULL; sdl_win = NULL; xwin = 0;
+	shown = 0;
+}
+
+static void
+host_create(void)
+{
+	SDL_SetHint(SDL_HINT_APP_ID, "nod");
+	/* lets compositors match us (picom: wintypes { notification = ... }) */
+	SDL_SetHint(SDL_HINT_X11_WINDOW_TYPE, "_NET_WM_WINDOW_TYPE_NOTIFICATION");
+	SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
+	SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
+	SDL_SetHint(SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR, "0");
+
+	/* With a compositor, ask SDL for a 32-bit visual: real transparency and
+	 * antialiased corners instead of a 1-bit shape mask. */
+	char cm[32], vid[32];
+	XVisualInfo vi;
+	snprintf(cm, sizeof(cm), "_NET_WM_CM_S%d", screen);
+	if (XGetSelectionOwner(dpy, XInternAtom(dpy, cm, False))
+	    && XMatchVisualInfo(dpy, screen, 32, TrueColor, &vi)) {
+		snprintf(vid, sizeof(vid), "0x%lx", vi.visualid);
+		SDL_SetHint(SDL_HINT_VIDEO_X11_VISUALID, vid);
+	} else {
+		SDL_ResetHint(SDL_HINT_VIDEO_X11_VISUALID);
+	}
+
+	ui_font = fonts_open();
+	host = cui_sdl3_create("nod", width, 100, ui_font);
+	if (!host) die("cannot create SDL3 window: %s", cui_sdl3_error());
+
+	/* cui_sdl3 owns the only SDL window; turn it into an unmanaged popup. */
+	int n = 0;
+	SDL_Window **ws = SDL_GetWindows(&n);
+	if (!ws || n < 1) die("cannot find SDL window");
+	sdl_win = ws[n - 1];
+	SDL_free(ws);
+	SDL_HideWindow(sdl_win);
+	SDL_SetWindowBordered(sdl_win, false);
+	SDL_SetWindowResizable(sdl_win, false);
+	SDL_SetWindowFocusable(sdl_win, false);
+	SDL_SyncWindow(sdl_win);
+	xwin = (Window)SDL_GetNumberProperty(SDL_GetWindowProperties(sdl_win),
+	                                     SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0);
+	if (!xwin) die("nod needs SDL's X11 video driver");
+	XWindowAttributes wa;
+	argb = XGetWindowAttributes(dpy, xwin, &wa) && wa.depth == 32;
+	if (getenv("NOD_DEBUG")) fprintf(stderr, "nod: window depth %d, renderer %s\n", wa.depth, cui_sdl3_driver(host));
+	XSetWindowAttributes swa = { .override_redirect = True };
+	XChangeWindowAttributes(dpy, xwin, CWOverrideRedirect, &swa);
+	XSync(dpy, False);
+
+	ui = cui_create((cui_config){
+		.width = width, .height = 100,
+		.measure = cui_font_measure,
+		.measure_styled = cui_font_measure_styled,
+		.text_geometry = cui_font_text_geometry,
+		.text_geometry_line = cui_font_text_geometry_line,
+		.font_metrics = cui_font_get_metrics,
+		.measure_user = ui_font });
+	if (!ui) die("cannot create CUI context");
+	win_w = win_h = 0;
+	dirty = 1;
 }
 
 static void
 theme_reload(void)
 {
-	if (!use_xresources)
-		return;
-
+	char *of = estrdup(font_name), *om = estrdup(mono_name);
+	double odpi = dpi;
 	theme_load();
-
-	if (xfont_bold && xfont_bold != xfont) XftFontClose(dpy, xfont_bold);
-	if (xfont) XftFontClose(dpy, xfont);
-
-	xfont = XftFontOpenName(dpy, screen, font);
-	if (!xfont) die("cannot load font: %s", font);
-
-	size_t fn = strlen(font);
-	char *bfn = ecalloc(1, fn + 32);
-	snprintf(bfn, fn + 32, "%s:style=Bold", font);
-	xfont_bold = XftFontOpenName(dpy, screen, bfn);
-	free(bfn);
-	if (!xfont_bold) xfont_bold = xfont;
-
-	for (int i = 0; i < 3; i++) {
-		XftColorFree(dpy, visual, cmap, &bg_xft[i]);
-		XftColorFree(dpy, visual, cmap, &fg_xft[i]);
-		XftColorFree(dpy, visual, cmap, &border_xft[i]);
+	if (strcmp(of, font_name) || strcmp(om, mono_name) || odpi != dpi) {
+		/* glyph caches are bound to the font: rebuild the host */
+		host_destroy();
+		host_create();
 	}
-
-	for (int i = 0; i < 3; i++) {
-		bg_xft[i]     = alloc_color(bg_colors[i]);
-		fg_xft[i]     = alloc_color(fg_colors[i]);
-		border_xft[i] = alloc_color(border_colors[i]);
-	}
-
-	for (int i = 0; i < MAX_NOTIFS; i++) {
-		Notif *n = &notifs[i];
-		if (!n->active) continue;
-		layout_notif(n);
-		if (n->win) {
-			XSetWindowBackground(dpy, n->win, bg_xft[n->urgency].pixel);
-			XSetWindowBorder(dpy, n->win, border_xft[n->urgency].pixel);
-			XResizeWindow(dpy, n->win, n->w, n->h);
-			set_window_shape(n->win, n->w, n->h, border_radius);
-			if (n->has_default_action && hand_cursor)
-				XDefineCursor(dpy, n->win, hand_cursor);
-			else
-				XUndefineCursor(dpy, n->win);
-		}
-	}
-
-	reposition_all();
-
-	for (int i = 0; i < MAX_NOTIFS; i++)
-		if (notifs[i].active)
-			draw_notif(&notifs[i]);
-
-	XFlush(dpy);
+	free(of); free(om);
+	dirty = 1;
 }
 
 static void
@@ -481,12 +559,7 @@ check_xrm_change(void)
 	if (!use_xresources || xresources_poll_ms <= 0)
 		return;
 	char *cur = get_resource_manager();
-	if (!cur) {
-		free(xrm_last);
-		xrm_last = NULL;
-		return;
-	}
-	if (!xrm_last || strcmp(cur, xrm_last)) {
+	if ((cur == NULL) != (xrm_last == NULL) || (cur && strcmp(cur, xrm_last))) {
 		free(xrm_last);
 		xrm_last = cur;
 		theme_reload();
@@ -498,46 +571,50 @@ check_xrm_change(void)
 static void
 on_sigusr1(int sig) { (void)sig; reload = 1; }
 
+/* Restrict the window to the cards: input only with a compositor (cards are
+ * drawn with real alpha), input and visuals without one. */
 static void
-x_init(void)
+set_shape(int w, int h)
 {
-	dpy = XOpenDisplay(NULL);
-	if (!dpy) die("cannot open display");
-	XSetErrorHandler(x_error_handler);
-	screen = DefaultScreen(dpy);
-	root = RootWindow(dpy, screen);
-	visual = DefaultVisual(dpy, screen);
-	cmap = DefaultColormap(dpy, screen);
-	depth = DefaultDepth(dpy, screen);
-
-	{
-		int shape_event, shape_error;
-		have_shape = XShapeQueryExtension(dpy, &shape_event, &shape_error);
+	static uint64_t last;
+	uint64_t sig = (1469598103934665603ull ^ (uint64_t)xwin) * 1099511628211ull ^ (uint64_t)w << 32 ^ (uint64_t)h;
+	for (int i = 0; i < MAX_NOTIFS; i++) {
+		const Notif *n = &notifs[i];
+		if (!n->active || n->op < .05f) continue;
+		float v[4] = { n->rect.x, n->rect.y, n->rect.w, n->rect.h };
+		for (int k = 0; k < 4; k++)
+			sig = (sig ^ (uint64_t)(int64_t)lroundf(v[k])) * 1099511628211ull;
 	}
-
-	theme_save_defaults();
-	theme_load();
-	xrm_last = get_resource_manager();
-
-	xfont = XftFontOpenName(dpy, screen, font);
-	if (!xfont) die("cannot load font: %s", font);
-
-	/* Try to load a bold variant; fontconfig falls through to
-	 * whatever matches closest, so a non-bold font still works. */
-	size_t fn = strlen(font);
-	char *bfn = ecalloc(1, fn + 32);
-	snprintf(bfn, fn + 32, "%s:style=Bold", font);
-	xfont_bold = XftFontOpenName(dpy, screen, bfn);
-	free(bfn);
-	if (!xfont_bold) xfont_bold = xfont;
-
-	for (int i = 0; i < 3; i++) {
-		bg_xft[i]     = alloc_color(bg_colors[i]);
-		fg_xft[i]     = alloc_color(fg_colors[i]);
-		border_xft[i] = alloc_color(border_colors[i]);
+	if (!have_shape || sig == last) return;
+	last = sig;
+	Pixmap mask = XCreatePixmap(dpy, xwin, w, h, 1);
+	GC gc = XCreateGC(dpy, mask, 0, NULL);
+	XSetForeground(dpy, gc, 0);
+	XFillRectangle(dpy, mask, gc, 0, 0, w, h);
+	XSetForeground(dpy, gc, 1);
+	for (int i = 0; i < MAX_NOTIFS; i++) {
+		Notif *n = &notifs[i];
+		if (!n->active || n->op < .05f) continue;
+		int x = (int)lroundf(n->rect.x), y = (int)lroundf(n->rect.y);
+		int cw = (int)lroundf(n->rect.w), ch = (int)lroundf(n->rect.h);
+		int r = border_radius, d;
+		if (r > cw / 2) r = cw / 2;
+		if (r > ch / 2) r = ch / 2;
+		d = 2 * r;
+		XFillRectangle(dpy, mask, gc, x + r, y, cw - d, ch);
+		XFillRectangle(dpy, mask, gc, x, y + r, cw, ch - d);
+		if (r > 0) {
+			XFillArc(dpy, mask, gc, x, y, d, d, 0, 360 * 64);
+			XFillArc(dpy, mask, gc, x + cw - d, y, d, d, 0, 360 * 64);
+			XFillArc(dpy, mask, gc, x, y + ch - d, d, d, 0, 360 * 64);
+			XFillArc(dpy, mask, gc, x + cw - d, y + ch - d, d, d, 0, 360 * 64);
+		}
 	}
-
-	hand_cursor = XCreateFontCursor(dpy, XC_hand2);
+	XShapeCombineMask(dpy, xwin, ShapeInput, 0, 0, mask, ShapeSet);
+	if (!argb)
+		XShapeCombineMask(dpy, xwin, ShapeBounding, 0, 0, mask, ShapeSet);
+	XFreeGC(dpy, gc);
+	XFreePixmap(dpy, mask);
 }
 
 /* ---------- notification table ---------- */
@@ -554,7 +631,7 @@ static int
 find_by_id(uint32_t id)
 {
 	for (int i = 0; i < MAX_NOTIFS; i++)
-		if (notifs[i].active && notifs[i].id == id) return i;
+		if (notifs[i].active && !notifs[i].closing && notifs[i].id == id) return i;
 	return -1;
 }
 
@@ -562,7 +639,7 @@ static int
 count_active(void)
 {
 	int c = 0;
-	for (int i = 0; i < MAX_NOTIFS; i++) if (notifs[i].active) c++;
+	for (int i = 0; i < MAX_NOTIFS; i++) if (notifs[i].active && !notifs[i].closing) c++;
 	return c;
 }
 
@@ -570,211 +647,24 @@ static int
 find_oldest(void)
 {
 	int oldest = -1;
-	for (int i = 0; i < MAX_NOTIFS; i++) {
-		if (!notifs[i].active) continue;
-		if (oldest < 0 ||
-		    notifs[i].created.tv_sec < notifs[oldest].created.tv_sec ||
-		    (notifs[i].created.tv_sec == notifs[oldest].created.tv_sec &&
-		     notifs[i].created.tv_nsec < notifs[oldest].created.tv_nsec))
+	for (int i = 0; i < MAX_NOTIFS; i++)
+		if (notifs[i].active && !notifs[i].closing
+		    && (oldest < 0 || newer(&notifs[oldest], &notifs[i])))
 			oldest = i;
-	}
 	return oldest;
-}
-
-static void
-free_lines(Notif *n)
-{
-	if (n->lines) {
-		for (int i = 0; i < n->nlines; i++) free(n->lines[i]);
-		free(n->lines);
-		n->lines = NULL;
-	}
-	n->nlines = 0;
 }
 
 static void
 free_notif_content(Notif *n)
 {
+	free(n->app);     n->app = NULL;
 	free(n->summary); n->summary = NULL;
 	free(n->body);    n->body = NULL;
-	free_lines(n);
-}
-
-static void
-layout_notif(Notif *n)
-{
-	free_lines(n);
-
-	int inner_maxw = max_width - 2 * padding;
-	if (inner_maxw < 20) inner_maxw = 20;
-
-	int sn = 0, bn = 0;
-	char **sl = wrap_text(xfont_bold,
-	                      n->summary ? n->summary : "", inner_maxw, 1, &sn);
-	char **bl = NULL;
-	if (n->body && n->body[0])
-		bl = wrap_text(xfont, n->body, inner_maxw, max_lines, &bn);
-
-	int total = sn + bn;
-	if (total == 0) total = 1;
-	n->lines = ecalloc(total, sizeof(char *));
-	int k = 0;
-	for (int i = 0; i < sn; i++) n->lines[k++] = sl[i];
-	for (int i = 0; i < bn; i++) n->lines[k++] = bl[i];
-	if (k == 0) n->lines[k++] = estrdup("");
-	n->nlines = k;
-	n->summary_nlines = sn;
-	free(sl);
-	free(bl);
-
-	int maxtw = 0;
-	for (int i = 0; i < n->nlines; i++) {
-		XftFont *f = (i < n->summary_nlines) ? xfont_bold : xfont;
-		int tw = text_width(f, n->lines[i], strlen(n->lines[i]));
-		if (tw > maxtw) maxtw = tw;
+	for (int i = 0; i < n->nactions; i++) {
+		free(n->actions[i].key);
+		free(n->actions[i].label);
 	}
-	n->w = maxtw + 2 * padding;
-	if (n->w > max_width) n->w = max_width;
-	if (n->w < 2 * padding + 20) n->w = 2 * padding + 20;
-
-	int lh_b = xfont_bold->ascent + xfont_bold->descent;
-	int lh_r = xfont->ascent + xfont->descent;
-	int body_n = n->nlines - n->summary_nlines;
-	int gap = (n->summary_nlines > 0 && body_n > 0) ? title_gap : 0;
-	n->h = n->summary_nlines * lh_b + gap + body_n * lh_r + 2 * padding;
-}
-
-static void
-set_window_shape(Window win, int w, int h, int r)
-{
-	if (!have_shape)
-		return;
-	if (r <= 0) {
-		XShapeCombineMask(dpy, win, ShapeBounding, 0, 0, None, ShapeSet);
-		return;
-	}
-
-	int maxr = (w < h ? w : h) / 2;
-	if (r > maxr) r = maxr;
-
-	Pixmap mask = XCreatePixmap(dpy, win, w, h, 1);
-	GC gc = XCreateGC(dpy, mask, 0, NULL);
-
-	XSetForeground(dpy, gc, 0);
-	XFillRectangle(dpy, mask, gc, 0, 0, w, h);
-
-	XSetForeground(dpy, gc, 1);
-	/* center */
-	XFillRectangle(dpy, mask, gc, r, r, w - 2 * r, h - 2 * r);
-	/* sides */
-	XFillRectangle(dpy, mask, gc, r, 0, w - 2 * r, r);
-	XFillRectangle(dpy, mask, gc, r, h - r, w - 2 * r, r);
-	XFillRectangle(dpy, mask, gc, 0, r, r, h - 2 * r);
-	XFillRectangle(dpy, mask, gc, w - r, r, r, h - 2 * r);
-	/* corners */
-	int d = 2 * r;
-	XFillArc(dpy, mask, gc, 0, 0, d, d, 90 * 64, 90 * 64);
-	XFillArc(dpy, mask, gc, w - d, 0, d, d, 0, 90 * 64);
-	XFillArc(dpy, mask, gc, 0, h - d, d, d, 180 * 64, 90 * 64);
-	XFillArc(dpy, mask, gc, w - d, h - d, d, d, 270 * 64, 90 * 64);
-
-	XShapeCombineMask(dpy, win, ShapeBounding, 0, 0, mask, ShapeSet);
-
-	XFreeGC(dpy, gc);
-	XFreePixmap(dpy, mask);
-}
-
-static void
-create_window(Notif *n)
-{
-	XSetWindowAttributes swa;
-	swa.override_redirect = True;
-	swa.background_pixel = bg_xft[n->urgency].pixel;
-	swa.border_pixel     = border_xft[n->urgency].pixel;
-	swa.event_mask       = ExposureMask | ButtonPressMask;
-
-	n->win = XCreateWindow(dpy, root,
-	    n->x, n->y, n->w, n->h, border_width,
-	    depth, InputOutput, visual,
-	    CWOverrideRedirect | CWBackPixel | CWBorderPixel | CWEventMask,
-	    &swa);
-
-	XClassHint ch = { .res_name = "nod", .res_class = "nod" };
-	XSetClassHint(dpy, n->win, &ch);
-
-	set_window_shape(n->win, n->w, n->h, border_radius);
-
-	if (n->has_default_action && hand_cursor)
-		XDefineCursor(dpy, n->win, hand_cursor);
-}
-
-static void
-draw_notif(Notif *n)
-{
-	if (!n->win) return;
-	XftDraw *xd = XftDrawCreate(dpy, n->win, visual, cmap);
-	XClearWindow(dpy, n->win);
-	int lh_b = xfont_bold->ascent + xfont_bold->descent;
-	int lh_r = xfont->ascent + xfont->descent;
-	int body_n = n->nlines - n->summary_nlines;
-	int gap = (n->summary_nlines > 0 && body_n > 0) ? title_gap : 0;
-	int y = padding;
-	for (int i = 0; i < n->nlines; i++) {
-		if (i == n->summary_nlines && gap) y += gap;
-		XftFont *f = (i < n->summary_nlines) ? xfont_bold : xfont;
-		int line_lh = (i < n->summary_nlines) ? lh_b : lh_r;
-		XftDrawStringUtf8(xd, &fg_xft[n->urgency], f,
-		    padding, y + f->ascent,
-		    (FcChar8 *)n->lines[i], strlen(n->lines[i]));
-		y += line_lh;
-	}
-	XftDrawDestroy(xd);
-}
-
-static void
-reposition_all(void)
-{
-	int mx, my, mw, mh;
-	get_focused_monitor(&mx, &my, &mw, &mh);
-
-	int idx[MAX_NOTIFS];
-	int n = 0;
-	for (int i = 0; i < MAX_NOTIFS; i++)
-		if (notifs[i].active) idx[n++] = i;
-
-	for (int i = 0; i < n; i++) {
-		for (int j = i + 1; j < n; j++) {
-			Notif *a = &notifs[idx[i]], *b = &notifs[idx[j]];
-			if (a->created.tv_sec > b->created.tv_sec ||
-			    (a->created.tv_sec == b->created.tv_sec &&
-			     a->created.tv_nsec > b->created.tv_nsec)) {
-				int t = idx[i]; idx[i] = idx[j]; idx[j] = t;
-			}
-		}
-	}
-
-	int top  = (position == TOP_LEFT || position == TOP_RIGHT);
-	int left = (position == TOP_LEFT || position == BOTTOM_LEFT);
-
-	int cursor = top ? (my + gap_y) : (my + mh - gap_y);
-
-	for (int i = 0; i < n; i++) {
-		Notif *ni = &notifs[idx[i]];
-		int wx = left ? (mx + gap_x)
-		              : (mx + mw - gap_x - ni->w - 2 * border_width);
-		int wy;
-		if (top) {
-			wy = cursor;
-			cursor += ni->h + 2 * border_width + stack_gap;
-		} else {
-			wy = cursor - ni->h - 2 * border_width;
-			cursor = wy - stack_gap;
-		}
-		ni->x = wx;
-		ni->y = wy;
-		if (ni->win)
-			XMoveWindow(dpy, ni->win, wx, wy);
-	}
+	n->nactions = 0;
 }
 
 /* ---------- dbus signal emit ---------- */
@@ -807,21 +697,463 @@ emit_action(uint32_t id, const char *key)
 	dbus_message_unref(m);
 }
 
+static int
+exit_side(void)
+{
+	return (position == TOP_LEFT || position == BOTTOM_LEFT) ? -1 : 1;
+}
+
+/* Signal the close now; the card animates out and is freed by update(). */
 static void
 dismiss(int i, uint32_t reason)
 {
-	if (!notifs[i].active) return;
-	uint32_t id = notifs[i].id;
-	if (notifs[i].win) {
-		XUnmapWindow(dpy, notifs[i].win);
-		XDestroyWindow(dpy, notifs[i].win);
-		notifs[i].win = 0;
-	}
+	Notif *n = &notifs[i];
+	if (!n->active || n->closing) return;
+	n->closing = 1;
+	if (!n->exit_dir)
+		n->exit_dir = exit_side();
+	emit_closed(n->id, reason);
+	dirty = 1;
+}
+
+static void
+release(int i)
+{
 	free_notif_content(&notifs[i]);
-	notifs[i].active = 0;
-	emit_closed(id, reason);
-	reposition_all();
-	XFlush(dpy);
+	notifs[i].active = notifs[i].closing = 0;
+	if (drag == &notifs[i]) drag = NULL;
+}
+
+/* ---------- card composition ---------- */
+
+static void
+rel_time(const Notif *n, char *buf, size_t sz)
+{
+	long s = ms_since(&n->created) / 1000;
+	if (s < 10)         snprintf(buf, sz, "just now");
+	else if (s < 60)    snprintf(buf, sz, "%lds ago", s);
+	else if (s < 3600)  snprintf(buf, sz, "%ldm ago", s / 60);
+	else                snprintf(buf, sz, "%ldh ago", s / 3600);
+}
+
+static void
+hline(cui_context *c, cui_color col)
+{
+	cui_begin_box(c, 0, (cui_box){ .width = -1, .height = 1, .background = col });
+	cui_end_box(c);
+}
+
+static void
+spacer(cui_context *c)
+{
+	cui_begin_box(c, 0, (cui_box){ .width = -1 });
+	cui_end_box(c);
+}
+
+static bool
+card_button(const char *key, const char *label, const char *icon, cui_color fg,
+            cui_color hover_bg)
+{
+	cui_color none = { 0 };
+	cui_button_options o = {
+		.variant = CUI_BUTTON_CUSTOM,
+		.size = CUI_CONTROL_SMALL,
+		.icon = icon ? cui_string(icon) : (cui_str){ 0 },
+		.font_size = mono_px,
+		.custom_colors = true,
+		.colors = { .normal = none, .hover = hover_bg, .active = alpha(hover_bg, 90),
+		            .foreground = fg, .border = none },
+		.hide_focus_ring = true,
+		.skip_tab = true,
+		.custom_cursor = true,
+		.cursor = CUI_CURSOR_POINTER,
+	};
+	return cui_button_ex(ui, cui_id_from(ui, key), &theme, cui_string(label), o);
+}
+
+static void
+card(Notif *n, int idx)
+{
+	UrgencyColors *p = &pal[n->urgency];
+	cui_color divider = mix(p->bg, p->fg, .12f);
+	cui_text_style mono = { .monospace = true };
+	cui_text_style monob = { .monospace = true, .weight = CUI_TEXT_WEIGHT_BOLD };
+	char key[32], when[32];
+
+	snprintf(key, sizeof(key), "n%u", n->id);
+	cui_push_id(ui, key);
+	/* outer: animated frame (position, height, inset, opacity), clips content */
+	cui_begin_absolute_box(ui, cui_id_from(ui, "card"), (cui_box){
+		.radius = border_radius, .clip = true,
+		.background = p->bg, .border = p->accent, .border_width = show_border ? border_width : 0,
+		.opacity = n->op, .custom_opacity = true }, n->rect);
+	/* body: always laid out at full width so its natural height is stable */
+	cui_id bid = cui_id_from(ui, "body");
+	cui_begin_box(ui, bid, (cui_box){ .width = width, .padding = padding, .gap = 10,
+	                                  .opacity = n->cop, .custom_opacity = true });
+
+	/* header: ● app • urgency ............ 2m ago */
+	if (show_app || show_urgency || show_time) {
+		cui_begin_box(ui, 0, (cui_box){ .width = -1, .row = true, .gap = 6,
+		                                .align_y = CUI_ALIGN_CENTER });
+		cui_begin_box(ui, 0, (cui_box){ .width = 8, .height = 8, .radius = 4,
+		                                .background = p->accent });
+		cui_end_box(ui);
+		if (show_app)
+			cui_text_ex(ui, cui_string(n->app[0] ? n->app : "notification"), mono_px,
+			            p->accent, 0, monob);
+		if (show_app && show_urgency)
+			cui_text_ex(ui, cui_string("\xe2\x80\xa2"), mono_px, muted, 0, mono);
+		if (show_urgency)
+			cui_text_ex(ui, cui_string(urgency_names[n->urgency]),
+			            mono_px, n->urgency == 2 ? p->accent : muted, 0, mono);
+		spacer(ui);
+		if (show_time) {
+			rel_time(n, when, sizeof(when));
+			cui_text_ex(ui, cui_string(when), mono_px, muted, 0, mono);
+		}
+		cui_end_box(ui);
+		if (divider_top)
+			hline(ui, divider);
+	}
+
+	/* content */
+	float inner = width - 2 * padding; /* fixed width so text wraps */
+	cui_begin_box(ui, 0, (cui_box){ .width = inner, .gap = 4 });
+	if (n->summary[0])
+		cui_text_paragraph_colored(ui, cui_string(n->summary), roundf(font_px * 1.08f), p->fg, 0,
+		                           (cui_text_style){ .weight = CUI_TEXT_WEIGHT_BOLD }, true, NULL, 0);
+	if (n->body[0]) {
+		float fs = roundf(font_px * .92f), lh = roundf(fs * 1.45f);
+		cui_begin_box(ui, 0, (cui_box){ .width = inner, .clip = true,
+		                                .max_height = max_lines > 0 ? lh * max_lines : 0 });
+		cui_text_ex(ui, cui_string(n->body), fs, mix(p->fg, p->bg, .15f), lh,
+		            (cui_text_style){ 0 });
+		cui_end_box(ui);
+	}
+	cui_end_box(ui);
+
+	/* footer: [▶ action] [action] ............ [✕ dismiss] */
+	if ((action_buttons && n->nactions) || dismiss_button) {
+		if (divider_bottom)
+			hline(ui, divider);
+		cui_begin_box(ui, 0, (cui_box){ .width = -1, .row = true, .gap = 4,
+		                                .align_y = CUI_ALIGN_CENTER });
+		for (int i = 0; action_buttons && i < n->nactions; i++) {
+			char akey[16];
+			snprintf(akey, sizeof(akey), "a%d", i);
+			if (card_button(akey, n->actions[i].label, i == 0 ? "play" : NULL,
+			                p->accent, alpha(p->accent, 40))) {
+				emit_action(n->id, n->actions[i].key);
+				dismiss(idx, 2);
+			}
+		}
+		spacer(ui);
+		if (dismiss_button && card_button("dismiss", "Dismiss", "close", muted, alpha(p->fg, 25)))
+			dismiss(idx, 2);
+		cui_end_box(ui);
+	}
+
+	cui_end_box(ui); /* body */
+	cui_end_box(ui); /* card */
+	cui_pop_id(ui);
+	n->bid = bid; /* natural height is read from it after end_frame */
+}
+
+/* Active notifications, newest first: index 0 is the front of the stack. */
+static int
+sorted(int *idx)
+{
+	int n = 0;
+	for (int i = 0; i < MAX_NOTIFS; i++)
+		if (notifs[i].active) idx[n++] = i;
+	for (int i = 0; i < n; i++)
+		for (int j = i + 1; j < n; j++)
+			if (newer(&notifs[idx[j]], &notifs[idx[i]])) {
+				int t = idx[i]; idx[i] = idx[j]; idx[j] = t;
+			}
+	return n;
+}
+
+static int
+inside(const Notif *n, float x, float y)
+{
+	return n->op > .05f && x >= n->rect.x && x < n->rect.x + n->rect.w &&
+	       y >= n->rect.y && y < n->rect.y + n->rect.h;
+}
+
+/* Topmost card under (x, y): the front of the stack is painted last. */
+static Notif *
+hit(const int *idx, int n, float x, float y)
+{
+	for (int k = 0; k < n; k++)
+		if (!notifs[idx[k]].closing && inside(&notifs[idx[k]], x, y))
+			return &notifs[idx[k]];
+	return NULL;
+}
+
+/* Cards only move towards the screen edge they leave through. */
+static float
+toward_exit(float dx)
+{
+	return dx * exit_side() > 0 ? dx : 0;
+}
+
+static Notif *click;
+
+/* Left click on a card without action buttons: invoke its default action. */
+static void
+card_clicked(Notif *c)
+{
+	if (!c->active || c->closing) return; /* the Dismiss button got there first */
+	const char *key = NULL;
+	for (int i = 0; i < c->nactions && !key; i++)
+		if (!strcmp(c->actions[i].key, "default")) key = c->actions[i].key;
+	if (!key && c->nactions) key = c->actions[0].key;
+	if (key) emit_action(c->id, key);
+	dismiss((int)(c - notifs), 2);
+}
+
+/* Pointer input that is not a button press: hover, right-click, swipes. */
+static void
+track_pointer(const int *idx, int n)
+{
+	size_t nev = 0;
+	const cui_event *ev = cui_frame_events(ui, &nev);
+	for (size_t e = 0; e < nev; e++) {
+		const cui_event *v = &ev[e];
+		Notif *c;
+		switch (v->type) {
+		case CUI_EVENT_POINTER_LEAVE:
+			pointer_x = pointer_y = -1;
+			break;
+		case CUI_EVENT_POINTER_MOVE:
+			pointer_x = v->x; pointer_y = v->y;
+			if (drag) {
+				drag->swipe = toward_exit(v->x - drag_x0);
+				if (fabsf(drag->swipe) > 6) dragging = 1;
+			}
+			break;
+		case CUI_EVENT_POINTER_DOWN:
+			pointer_x = v->x; pointer_y = v->y;
+			if (!(c = hit(idx, n, v->x, v->y))) break;
+			if (v->pointer_button == CUI_POINTER_SECONDARY) {
+				dismiss((int)(c - notifs), 2);
+			} else if (v->pointer_button == CUI_POINTER_PRIMARY) {
+				drag = c; drag_x0 = v->x; dragging = 0;
+			}
+			break;
+		case CUI_EVENT_POINTER_UP:
+			if (!drag) break;
+			if (dragging) {
+				cui_cancel_event_activation(ui, e); /* a swipe is not a click */
+				if (fabsf(drag->swipe) > width * swipe_threshold) {
+					dismiss((int)(drag - notifs), 2);
+				}
+			} else if (!action_buttons) {
+				click = drag; /* acted on after the frame, unless a button took it */
+			}
+			drag->swipe = 0;
+			drag = NULL; dragging = 0;
+			break;
+		case CUI_EVENT_SCROLL: /* touchpad two-finger swipe */
+			if (fabsf(v->dx) <= fabsf(v->dy) || !(c = hit(idx, n, v->x, v->y))) break;
+			c->swipe = toward_exit(c->swipe - v->dx * (v->scroll_precise ? 1 : 40));
+			clock_gettime(CLOCK_MONOTONIC, &c->swipe_t);
+			if (fabsf(c->swipe) > width * swipe_threshold) {
+				dismiss((int)(c - notifs), 2);
+			}
+			break;
+		default:
+			break;
+		}
+	}
+}
+
+/* Frame-rate independent ease towards target; returns 1 while still moving. */
+static int
+approach(float *v, float target, float dt, float eps)
+{
+	*v += (target - *v) * (1 - expf(-dt * anim_speed));
+	if (fabsf(target - *v) < eps) { *v = target; return 0; }
+	return 1;
+}
+
+/* Compute every card's target (expanded list or collapsed deck), advance the
+ * animation by dt and lay out the rectangles. Returns the window height. */
+static float
+update(const int *idx, int n, float dt)
+{
+	float off = 0, total = 0, front_h = 0;
+	int depth = 0, top = position == TOP_LEFT || position == TOP_RIGHT;
+	int enter_dir = exit_side();
+
+	for (int k = 0; k < n; k++) {
+		Notif *c = &notifs[idx[k]];
+		total += c->h + stack_gap;
+		if (!c->closing && !front_h) front_h = c->h;
+	}
+
+	for (int k = 0; k < n; k++) {
+		Notif *c = &notifs[idx[k]];
+		int d = depth < max_peek ? depth : max_peek;
+		float ty, th = c->h, tin = 0, tcop = 1, top_ = 1, tx = 0;
+		float tvis = c->closing ? 0 : 1;
+
+		if (expanded) {
+			ty = off;
+			off += (c->h + stack_gap) * c->vis;
+		} else {
+			ty = d * peek;
+			tin = d * peek;
+			if (depth > 0) {
+				th = front_h;     /* behind cards show only their bottom edge */
+				tcop = 0;
+				top_ = depth <= max_peek ? 1 - .12f * depth : 0;
+			}
+		}
+		if (!c->closing) depth++;
+
+		int swiping = c == drag || ms_since(&c->swipe_t) < 200;
+		if (!swiping) c->swipe = 0;
+		if (c->closing) { tx = c->exit_dir * (float)width; top_ = 0; }
+		else            tx = c->swipe;
+
+		if (c->fresh && c->h > 0) {  /* first layout: start just off the edge */
+			c->fresh = 0;
+			c->y = ty; c->hcur = th; c->inset = tin; c->cop = tcop;
+			c->x = enter_dir * width * .35f; c->op = 0; c->vis = 0;
+		}
+		if (swiping && !c->closing) c->x = tx; /* follow the finger exactly */
+		if (!c->fresh) {
+			animating |= approach(&c->y, ty, dt, .3f);
+			animating |= approach(&c->x, tx, dt, .3f);
+			animating |= approach(&c->hcur, th, dt, .3f);
+			animating |= approach(&c->inset, tin, dt, .3f);
+			animating |= approach(&c->op, top_, dt, .01f);
+			animating |= approach(&c->cop, tcop, dt, .01f);
+			animating |= approach(&c->vis, tvis, dt, .01f);
+		}
+	}
+
+	float H = ceilf(total);
+	for (int k = 0; k < n; k++) {
+		Notif *c = &notifs[idx[k]];
+		float ry = top ? c->y : H - c->y - c->hcur;
+		float in = roundf(c->inset);
+		c->rect = (cui_rect){ roundf(in + c->x), roundf(ry), width - 2 * in,
+		                      c->fresh ? 0 : roundf(c->hcur) };
+	}
+	return H > 1 ? H : 1;
+}
+
+static void
+hide(void)
+{
+	if (shown) SDL_HideWindow(sdl_win);
+	shown = 0;
+	pointer_x = pointer_y = -1;
+	drag = NULL;
+}
+
+static void
+render(void)
+{
+	int idx[MAX_NOTIFS];
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	float dt = (now.tv_sec - last_frame.tv_sec) + (now.tv_nsec - last_frame.tv_nsec) / 1e9f;
+	if (dt > .05f || dt < 0) dt = .016f;
+	last_frame = now;
+
+	/* finished exit animations free their slot */
+	for (int i = 0; i < MAX_NOTIFS; i++)
+		if (notifs[i].active && notifs[i].closing && notifs[i].op < .02f && notifs[i].vis < .02f)
+			release(i);
+
+	int n = sorted(idx);
+	if (!n) { hide(); animating = 0; return; }
+
+	/* hover expands the deck; it folds back shortly after the pointer leaves */
+	int live = count_active(), hovered = hit(idx, n, pointer_x, pointer_y) != NULL;
+	if (hovered || drag) {
+		hover_t = now;
+		for (int k = 0; k < n; k++) /* reading: hold every timeout */
+			notifs[idx[k]].deadline_base = now;
+	}
+	expanded = !collapse || live <= 1 || hovered || drag || ms_since(&hover_t) < 400;
+
+	/* keep frames coming while a fold-back is pending */
+	animating = expanded && !hovered && !drag && ms_since(&hover_t) < 400;
+	cui_id rid = cui_id_from(ui, "root");
+	cui_draw_list list = { 0 };
+	float H = 1;
+	/* new or re-wrapped cards need their height before they can be placed:
+	 * lay out again (without advancing time) until heights are stable */
+	for (int pass = 0; pass < 3; pass++) {
+		H = update(idx, n, pass ? 0 : dt);
+		if (!cui_begin_frame(ui, width, H, pass ? 0 : dt)) return;
+		if (!pass)
+			track_pointer(idx, n);
+		cui_begin_box(ui, rid, (cui_box){ .width = width, .height = H,
+		                                  .fixed_width = true, .fixed_height = true });
+		for (int k = n - 1; k >= 0; k--) /* back to front */
+			card(&notifs[idx[k]], idx[k]);
+		cui_end_box(ui);
+		list = cui_end_frame(ui);
+		if (click) { card_clicked(click); click = NULL; }
+		if (cui_last_error(ui) != CUI_OK) {
+			fprintf(stderr, "nod: CUI layout error %d\n", (int)cui_last_error(ui));
+			cui_clear_error(ui);
+		}
+		int changed = 0;
+		for (int k = 0; k < n; k++) {
+			Notif *c = &notifs[idx[k]];
+			float h = cui_bounds(ui, c->bid).h;
+			if (h > 0 && fabsf(h - c->h) > .5f) { c->h = h; changed = 1; }
+		}
+		if (!changed) break;
+	}
+	/* size and place the window, then paint */
+	static int mx, my, mw, mh;
+	static struct timespec mon_t;
+	if (!shown || ms_since(&mon_t) > 1000) { /* X round trips: not every frame */
+		get_focused_monitor(&mx, &my, &mw, &mh);
+		mon_t = now;
+	}
+	int w = width, h = (int)H;
+	int top = position == TOP_LEFT || position == TOP_RIGHT;
+	int x = (position == TOP_LEFT || position == BOTTOM_LEFT) ? mx + gap_x : mx + mw - gap_x - w;
+	int y = top ? my + gap_y : my + mh - gap_y - h;
+	if (x != win_x || y != win_y || w != win_w || h != win_h || !shown) {
+		/* one atomic request for the server (no half-moved frame on screen),
+		 * then the same geometry through SDL so its cached size, used by the
+		 * renderer's logical presentation, matches before we paint */
+		XMoveResizeWindow(dpy, xwin, x, y, w, h);
+		XFlush(dpy);
+		SDL_SetWindowSize(sdl_win, w, h);
+		SDL_SetWindowPosition(sdl_win, x, y);
+		win_x = x; win_y = y; win_w = w; win_h = h;
+		if (!shown) {
+			SDL_ShowWindow(sdl_win);
+			XRaiseWindow(dpy, xwin);
+			XFlush(dpy);
+			shown = 1;
+		}
+		SDL_SyncWindow(sdl_win);
+		for (int tries = 0; tries < 20; tries++) {
+			int cw = 0, ch = 0;
+			SDL_PumpEvents();
+			if (SDL_GetWindowSize(sdl_win, &cw, &ch) && cw == w && ch == h) break;
+			SDL_Delay(2);
+		}
+	}
+	set_shape(w, h);
+	cui_sdl3_render(host, &list, (cui_color){ 0, 0, 0, 0 });
+	cui_sdl3_set_cursor(host, cui_pointer_cursor(ui));
+	/* input of this frame changed the hover state: the next frame reacts */
+	if ((hit(idx, n, pointer_x, pointer_y) != NULL) != hovered || drag)
+		dirty = 1;
 }
 
 /* ---------- Notify handler ---------- */
@@ -833,10 +1165,11 @@ handle_notify(DBusMessage *msg)
 	if (!dbus_message_iter_init(msg, &args)) return 0;
 
 	const char *app_name = "", *app_icon = "", *summary = "", *body = "";
+	const char *acts[2 * MAX_ACTIONS];
+	int nacts = 0;
 	uint32_t replaces_id = 0;
 	int32_t  expire_timeout = -1;
 	int      urgency = 1;
-	int      has_default = 0;
 
 	if (dbus_message_iter_get_arg_type(&args) != DBUS_TYPE_STRING) return 0;
 	dbus_message_iter_get_basic(&args, &app_name);
@@ -862,16 +1195,12 @@ handle_notify(DBusMessage *msg)
 	if (dbus_message_iter_get_arg_type(&args) == DBUS_TYPE_ARRAY) {
 		DBusMessageIter ai;
 		dbus_message_iter_recurse(&args, &ai);
-		int k = 0;
-		while (dbus_message_iter_get_arg_type(&ai) == DBUS_TYPE_STRING) {
-			if (k % 2 == 0) {
-				const char *key;
-				dbus_message_iter_get_basic(&ai, &key);
-				if (key && !strcmp(key, "default")) has_default = 1;
-			}
-			k++;
+		while (dbus_message_iter_get_arg_type(&ai) == DBUS_TYPE_STRING
+		       && nacts < 2 * MAX_ACTIONS) {
+			dbus_message_iter_get_basic(&ai, &acts[nacts++]);
 			dbus_message_iter_next(&ai);
 		}
+		nacts &= ~1;
 	}
 	dbus_message_iter_next(&args);
 
@@ -904,7 +1233,7 @@ handle_notify(DBusMessage *msg)
 	if (dbus_message_iter_get_arg_type(&args) == DBUS_TYPE_INT32)
 		dbus_message_iter_get_basic(&args, &expire_timeout);
 
-	(void)app_name; (void)app_icon;
+	(void)app_icon;
 
 	/* locate / allocate slot */
 	int slot = -1;
@@ -914,16 +1243,16 @@ handle_notify(DBusMessage *msg)
 		if (slot >= 0) is_replace = 1;
 	}
 	if (slot < 0) {
-		if (count_active() >= max_visible) {
+		while (count_active() >= max_visible) {
 			int o = find_oldest();
-			if (o >= 0) dismiss(o, 2);
+			if (o < 0) break;
+			dismiss(o, 2);
 		}
-		slot = find_free_slot();
-		if (slot < 0) {
-			int o = find_oldest();
-			if (o >= 0) { dismiss(o, 2); slot = find_free_slot(); }
+		if ((slot = find_free_slot()) < 0) { /* only exiting cards left: cut one short */
+			for (int i = 0; i < MAX_NOTIFS && slot < 0; i++)
+				if (notifs[i].closing) { release(i); slot = i; }
+			if (slot < 0) return 0;
 		}
-		if (slot < 0) return 0;
 	}
 
 	Notif *n = &notifs[slot];
@@ -936,40 +1265,25 @@ handle_notify(DBusMessage *msg)
 		if (next_id == 0) next_id = 1;
 		memset(n, 0, sizeof(*n));
 		n->id = id;
+		n->fresh = 1;
+		clock_gettime(CLOCK_MONOTONIC, &n->created);
 	}
 
+	n->app     = strip_markup(app_name);
 	n->summary = strip_markup(summary);
 	n->body    = strip_markup(body);
 	n->urgency = urgency;
-	n->has_default_action = has_default;
-
-	int tm;
-	if (expire_timeout > 0) tm = expire_timeout;
-	else                    tm = timeouts[urgency] * 1000;
-	n->timeout_ms = tm;
-
-	clock_gettime(CLOCK_MONOTONIC, &n->created);
-	n->active = 1;
-
-	layout_notif(n);
-
-	if (is_replace && n->win) {
-		XSetWindowBackground(dpy, n->win, bg_xft[n->urgency].pixel);
-		XSetWindowBorder(dpy, n->win, border_xft[n->urgency].pixel);
-		XResizeWindow(dpy, n->win, n->w, n->h);
-		set_window_shape(n->win, n->w, n->h, border_radius);
-		if (n->has_default_action && hand_cursor)
-			XDefineCursor(dpy, n->win, hand_cursor);
-		else
-			XUndefineCursor(dpy, n->win);
-	} else {
-		create_window(n);
-		XMapRaised(dpy, n->win);
+	for (int i = 0; i < nacts; i += 2) {
+		Action *a = &n->actions[n->nactions++];
+		a->key   = estrdup(acts[i]);
+		/* "default" with an empty label still deserves a visible button */
+		a->label = estrdup(acts[i + 1][0] ? acts[i + 1] : "Open");
 	}
 
-	reposition_all();
-	draw_notif(n);
-	XFlush(dpy);
+	n->timeout_ms = expire_timeout > 0 ? expire_timeout : timeouts[urgency] * 1000;
+	clock_gettime(CLOCK_MONOTONIC, &n->deadline_base);
+	n->active = 1;
+	dirty = 1;
 	return id;
 }
 
@@ -1107,51 +1421,17 @@ dbus_init(void)
 		die("dbus register object path failed");
 }
 
-/* ---------- X events ---------- */
-
-static void
-handle_x_event(XEvent *ev)
-{
-	switch (ev->type) {
-	case Expose: {
-		for (int i = 0; i < MAX_NOTIFS; i++)
-			if (notifs[i].active && notifs[i].win == ev->xexpose.window) {
-				draw_notif(&notifs[i]);
-				break;
-			}
-		break;
-	}
-	case ButtonPress: {
-		int i;
-		for (i = 0; i < MAX_NOTIFS; i++)
-			if (notifs[i].active && notifs[i].win == ev->xbutton.window) break;
-		if (i == MAX_NOTIFS) break;
-		if (ev->xbutton.button == Button1) {
-			if (notifs[i].has_default_action)
-				emit_action(notifs[i].id, "default");
-			dismiss(i, 2);
-		} else if (ev->xbutton.button == Button3) {
-			dismiss(i, 2);
-		}
-		break;
-	}
-	default:
-		break;
-	}
-}
-
 /* ---------- main loop ---------- */
 
 static void
 on_signal(int sig) { (void)sig; running = 0; }
 
+/* ms until n times out; -1 if persistent */
 static long
-ms_remaining(Notif *n, struct timespec *now)
+ms_remaining(Notif *n)
 {
 	if (n->timeout_ms <= 0) return -1;
-	long elapsed = (now->tv_sec  - n->created.tv_sec)  * 1000L
-	             + (now->tv_nsec - n->created.tv_nsec) / 1000000L;
-	long rem = n->timeout_ms - elapsed;
+	long rem = n->timeout_ms - ms_since(&n->deadline_base);
 	return rem < 0 ? 0 : rem;
 }
 
@@ -1172,73 +1452,89 @@ main(int argc, char *argv[])
 	sigaction(SIGTERM, &sa, NULL);
 	sigaction(SIGINT,  &sa, NULL);
 	signal(SIGPIPE, SIG_IGN);
+	sa.sa_handler = on_sigusr1;
+	sigaction(SIGUSR1, &sa, NULL);
 
-	struct sigaction sa_reload = { 0 };
-	sa_reload.sa_handler = on_sigusr1;
-	sigaction(SIGUSR1, &sa_reload, NULL);
+	/* SDL must render through X11: nod relies on override-redirect + Shape */
+	SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "x11");
 
-	x_init();
+	if (!(dpy = XOpenDisplay(NULL))) die("cannot open display");
+	XSetErrorHandler(x_error_handler);
+	XrmInitialize();
+	screen = DefaultScreen(dpy);
+	root = RootWindow(dpy, screen);
+	int sev, serr;
+	have_shape = XShapeQueryExtension(dpy, &sev, &serr);
+	if (!FcInit()) die("cannot initialise fontconfig");
+
+	xrm_last = use_xresources ? get_resource_manager() : NULL;
+	theme_load();
+	host_create();
 	dbus_init();
 
 	int dfd = -1;
 	if (!dbus_connection_get_unix_fd(dbus, &dfd))
 		die("cannot get dbus fd");
-	int xfd = ConnectionNumber(dpy);
+
+	struct timespec last_paint = { 0 }, last_xrm;
+	clock_gettime(CLOCK_MONOTONIC, &last_xrm);
 
 	while (running) {
-		while (XPending(dpy)) {
-			XEvent ev;
-			XNextEvent(dpy, &ev);
-			handle_x_event(&ev);
-		}
-
-		while (dbus_connection_get_dispatch_status(dbus) == DBUS_DISPATCH_DATA_REMAINS)
-			dbus_connection_dispatch(dbus);
-
-		dbus_connection_flush(dbus);
-		check_xrm_change();
-
-		struct timespec now;
-		clock_gettime(CLOCK_MONOTONIC, &now);
-		long next_ms = -1;
-		for (int i = 0; i < MAX_NOTIFS; i++) {
-			if (!notifs[i].active) continue;
-			long r = ms_remaining(&notifs[i], &now);
-			if (r < 0) continue;
-			if (next_ms < 0 || r < next_ms) next_ms = r;
-		}
-		int timeout;
-		if (next_ms < 0) timeout = -1;
-		else if (next_ms > INT_MAX) timeout = INT_MAX;
-		else timeout = (int)next_ms;
-
-		int xrm_timeout = (use_xresources && xresources_poll_ms > 0) ? xresources_poll_ms : -1;
-		if (xrm_timeout >= 0 && (timeout < 0 || timeout > xrm_timeout))
-			timeout = xrm_timeout;
-
-		struct pollfd pfd[2];
-		pfd[0].fd = xfd; pfd[0].events = POLLIN; pfd[0].revents = 0;
-		pfd[1].fd = dfd; pfd[1].events = POLLIN; pfd[1].revents = 0;
-
-		int pr = poll(pfd, 2, timeout);
-		if (pr < 0 && errno != EINTR) break;
-
-		if (reload) {
-			theme_reload();
-			reload = 0;
-		}
-
 		dbus_connection_read_write(dbus, 0);
 		while (dbus_connection_get_dispatch_status(dbus) == DBUS_DISPATCH_DATA_REMAINS)
 			dbus_connection_dispatch(dbus);
+		dbus_connection_flush(dbus);
 
-		clock_gettime(CLOCK_MONOTONIC, &now);
-		for (int i = 0; i < MAX_NOTIFS; i++) {
-			if (!notifs[i].active) continue;
-			if (notifs[i].timeout_ms <= 0) continue;
-			if (ms_remaining(&notifs[i], &now) == 0)
-				dismiss(i, 1);
+		if (reload) {
+			reload = 0;
+			theme_reload();
 		}
+		if (xresources_poll_ms > 0 && ms_since(&last_xrm) >= xresources_poll_ms) {
+			clock_gettime(CLOCK_MONOTONIC, &last_xrm);
+			check_xrm_change();
+		}
+
+		long next_ms = -1;
+		for (int i = 0; i < MAX_NOTIFS; i++) {
+			if (!notifs[i].active || notifs[i].closing) continue;
+			long r = ms_remaining(&notifs[i]);
+			if (r == 0) dismiss(i, 1);
+			else if (r > 0 && (next_ms < 0 || r < next_ms)) next_ms = r;
+		}
+
+		/* SDL delivers pointer input only while cards are shown */
+		if (shown) {
+			static float lx, ly;
+			static SDL_Window *lf;
+			float mx, my;
+			cui_sdl3_poll(host, ui);
+			SDL_MouseButtonFlags b = SDL_GetMouseState(&mx, &my);
+			SDL_Window *f = SDL_GetMouseFocus();
+			/* pointer motion drives hover/swipe even when CUI has nothing to redraw */
+			if (f != lf || (f && (mx != lx || my != ly)) || b) dirty = 1;
+			lx = mx; ly = my; lf = f;
+		}
+		/* repaint on change, on CUI request (hover, press) and once a second
+		 * so "2m ago" stays current */
+		if (dirty || animating ||
+		    (shown && (cui_needs_redraw(ui) || ms_since(&last_paint) >= 1000))) {
+			dirty = 0;
+			render();
+			clock_gettime(CLOCK_MONOTONIC, &last_paint);
+		}
+
+		int timeout = next_ms > INT_MAX ? INT_MAX : (int)next_ms;
+		if (shown && (timeout < 0 || timeout > 33)) timeout = 33;
+		if (animating) { /* ~60 fps; vsync in present keeps frames on the beat */
+			long left = 16 - ms_since(&last_frame);
+			timeout = left > 0 ? (int)left : 0;
+		}
+		if (xresources_poll_ms > 0 && (timeout < 0 || timeout > xresources_poll_ms))
+			timeout = xresources_poll_ms;
+
+		struct pollfd pfd = { .fd = dfd, .events = POLLIN };
+		if (poll(&pfd, 1, dirty ? 0 : timeout) < 0 && errno != EINTR)
+			break;
 	}
 
 	for (int i = 0; i < MAX_NOTIFS; i++)
@@ -1249,10 +1545,11 @@ main(int argc, char *argv[])
 		dbus_bus_release_name(dbus, BUS_NAME, NULL);
 		dbus_connection_unref(dbus);
 	}
+	host_destroy();
+	SDL_Quit();
 	free(xrm_last);
-	if (hand_cursor) XFreeCursor(dpy, hand_cursor);
-	if (xfont_bold && xfont_bold != xfont) XftFontClose(dpy, xfont_bold);
-	if (xfont) XftFontClose(dpy, xfont);
-	if (dpy)   XCloseDisplay(dpy);
+	free(font_name);
+	free(mono_name);
+	XCloseDisplay(dpy);
 	return 0;
 }

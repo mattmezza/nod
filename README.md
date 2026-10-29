@@ -11,24 +11,26 @@ notifications.
 
 ## Features
 
-- Single `.c` source file, single `config.h`, no runtime config
+- Single `nod.c`, single `config.h`, no runtime config
 - Native D-Bus — no `herbe` wrapper, no FIFOs
+- Cards drawn with [CUI](https://github.com/mattmezza/cui) (vendored), GPU
+  accelerated through SDL3's renderer
+- Header (app, urgency, relative time), summary, body, action buttons — each part toggleable
+- Folding stack that unfolds on hover, animated entrance/exit, swipe to dismiss
 - Multi-monitor aware (follows focused window via XRandR)
-- Stacked notifications, configurable corner
-- Per-urgency colors and timeouts
-- Click to dismiss / invoke `"default"` action
-- X resources theming with runtime reload
-- Optional rounded corners via the X Shape extension
-- Xft font rendering with fontconfig emoji fallback
-- `~900` lines of C99
+- Stacked notifications, configurable corner, rounded corners (X Shape)
+- Theming from X resources, falling back to `*.background`, `*.foreground`
+  and `*.colorN` — wallpaper palettes (pywal, wallust, …) just work
+- Runtime theme reload (polling or `SIGUSR1`)
 
 ## Requirements
 
-- libX11, libXft, libXrandr, libXext
+- libX11, libXrandr, libXext, fontconfig
+- SDL3 >= 3.2, FreeType, HarfBuzz (for CUI)
 - libdbus-1
 - a running X session
 
-On Arch: `pacman -S libx11 libxft libxrandr libxext dbus`
+On Arch: `pacman -S libx11 libxrandr libxext fontconfig sdl3 freetype2 harfbuzz dbus`
 
 ## Build
 
@@ -37,39 +39,73 @@ make
 sudo make install
 ```
 
-Edit `config.def.h` then `make clean && make` to reconfigure.
-`border_radius` sets rounded corners via the X Shape extension (`0` = square).
+The first `make` compiles the vendored CUI sources into `build/libcui.a`
+(once); after that only `nod.c` rebuilds. Edit `config.h` (copied from
+`config.def.h`) and run `make` to reconfigure.
+
+## CUI (vendored native bundle)
+
+`vendor/cui-native/` is CUI's *native source bundle* — portable C sources,
+FreeType/HarfBuzz text, bidi and the SDL3 adapter — pinned to the commit in
+`vendor/cui-native/REVISION`. Its starter app, Makefile and fonts are removed:
+nod is the host, `config.mk`/`Makefile` compile the sources listed in
+`vendor/cui-native/sources.mk`, and fonts are resolved through fontconfig.
+
+To update it from a CUI checkout:
+
+```sh
+git clone https://github.com/mattmezza/cui ~/dev/cui   # once
+make update-cui CUI_SRC=~/dev/cui                     # runs `make native-dist` there
+make distclean all
+```
+
+To play with CUI on its own, the same bundle builds the upstream starter:
+
+```sh
+cd ~/dev/cui && make native-dist
+tar -xzf build/cui-native.tar.gz -C /tmp && make -C /tmp/cui-native
+/tmp/cui-native/build/native_starter
+```
 
 ## Theming via X resources
 
-Set `use_xresources = 1` in `config.h` to read colors and font from
-X resources at startup. Any unset resource falls back to the compiled-in
-default.
+With `use_xresources = 1` (default) nod reads, per urgency
+(`low`, `normal`, `critical`):
 
-Example `~/.Xresources`:
+| what | resource | falls back to |
+| --- | --- | --- |
+| card background | `nod.background.<u>` | `nod.background`, `*.background` |
+| text | `nod.foreground.<u>` | `nod.foreground`, `*.foreground` |
+| border, dot, buttons | `nod.accent.<u>` | `nod.border.<u>`, `*.color8` / `*.color4` / `*.color1` |
+| secondary text | `nod.muted` | `*.color8` |
+| fonts | `nod.font`, `nod.monoFont` | `config.h` |
+
+Font sizes in points are resolved at `Xft.dpi` (96 when unset), like Xft.
+Accent, text and muted colours are nudged towards the foreground until they
+reach `min_contrast` against the card, so arbitrary palettes stay readable;
+critical cards are tinted with their accent (`critical_tint`).
+
+With a compositor (picom, …) nod uses a 32-bit window: real transparency and
+antialiased corners. Without one it falls back to a Shape mask. Exclude
+nod from compositor blur/rounding, e.g. for picom:
 
 ```
-nod.font:              Noto Sans:size=10
-nod.background.low:    #1d2021
-nod.background.normal: #1d2021
-nod.background.critical: #cc241d
-nod.foreground.low:    #928374
-nod.foreground.normal: #ebdbb2
-nod.foreground.critical: #1d2021
-nod.border.low:        #928374
-nod.border.normal:     #458588
-nod.border.critical:   #cc241d
+blur-background-exclude = [ "class_g = 'nod'" ];
+rounded-corners-exclude = [ "class_g = 'nod'" ];
 ```
 
-Load with `xrdb -merge ~/.Xresources` before starting `nod`.
+So a wallpaper-generated palette works with no nod entries at all. Override
+only what you want:
 
-`nod` polls the X resource database every `xresources_poll_ms` milliseconds
-(default 5000) and reloads colors/font automatically when it changes.
-Set `xresources_poll_ms = 0` to disable polling and use `SIGUSR1` instead:
-
-```sh
-killall -USR1 nod
 ```
+nod.font:            Noto Sans:size=11
+nod.monoFont:        JetBrains Mono:size=10
+nod.accent.critical: #cc241d
+```
+
+nod polls the resource database every `xresources_poll_ms` (default 2000)
+and repaints when it changes; `xresources_poll_ms = 0` disables polling,
+then use `killall -USR1 nod`.
 
 ## Run
 
@@ -134,20 +170,31 @@ There is also an isolated Xephyr test for X resources reload:
 
 ## Interaction
 
-- **Left-click**  a notification — invoke `default` action (if any), then dismiss
-- **Right-click** a notification — dismiss only, never invoke action
-- **Timeout**     — auto-dismiss
+- **Stack** — several notifications fold into a deck; hover to unfold it
+- **Action buttons** — one per action (max 3); emits `ActionInvoked`, then dismisses.
+  With `action_buttons = 0` a left click on the card invokes the default action
+- **Dismiss** button, **right-click**, or **swipe** (drag or two-finger
+  touchpad swipe towards the screen edge) — dismiss only
+- **Hover** — holds every timeout while the pointer is over the stack
+- **Timeout** — auto-dismiss
+
+Card parts (app name, urgency, time, dividers, buttons, border), stacking and
+motion are toggled in `config.h`.
 
 ## What nod does NOT do
 
-Icons. Markup. Sound. History. Persistence (timeout 0 = default, not
-infinite). Runtime config. CLI flags beyond `-v`. Focus stealing.
+Icons. Markup. Sound. History. Runtime config. CLI flags beyond `-v`.
+Focus stealing. Wayland.
 
 If you want those, use `dunst`.
 
 ## Screenshot
 
-![screenshot](screenshot.png)
+![unfolded stack](screenshot.png)
+
+Folded (default when more than one notification is shown):
+
+![folded stack](screenshot-stack.png)
 
 ## License
 
