@@ -1,0 +1,19 @@
+#!/bin/sh
+# Control nod's do-not-disturb state on the session bus.
+set -eu
+case ${1:-toggle} in
+  toggle) method=Toggle ;;
+  on) method=On ;;
+  off) method=Off ;;
+  status) method=Status ;;
+  -h|--help) echo 'Usage: nod-dnd [toggle|on|off|status]'; exit 0 ;;
+  *) echo 'Usage: nod-dnd [toggle|on|off|status]' >&2; exit 2 ;;
+esac
+if [ "$#" -gt 1 ]; then echo 'Usage: nod-dnd [toggle|on|off|status]' >&2; exit 2; fi
+result=$(dbus-send --session --print-reply --dest=org.freedesktop.Notifications \
+  /org/freedesktop/Notifications "org.nod.Dnd.$method")
+case "$result" in
+  *'boolean true'*) echo on ;;
+  *'boolean false'*) echo off ;;
+  *) echo 'nod-dnd: unexpected response from daemon' >&2; exit 1 ;;
+esac

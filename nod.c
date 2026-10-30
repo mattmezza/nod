@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 #include <X11/Xatom.h>
@@ -23,6 +24,7 @@
 #include <X11/Xresource.h>
 #include <X11/Xutil.h>
 #include <X11/extensions/Xrandr.h>
+#include <X11/extensions/Xrender.h>
 #include <X11/extensions/shape.h>
 #include <fontconfig/fontconfig.h>
 
@@ -50,6 +52,7 @@ typedef struct {
 	int      active;
 	int      closing;         /* exit animation running; already signalled */
 	int      fresh;           /* not laid out yet */
+	int      dnd_notice;      /* local schedule notification */
 	char    *app, *summary, *body;
 	int      urgency;
 	Action   actions[MAX_ACTIONS];
@@ -106,10 +109,21 @@ static float           drag_x0;
 static int             dragging;
 
 static DBusConnection *dbus;
+static int dnd_state, dnd_schedule_state, dnd_override = -1;
+static uint32_t suppressed_id;
+static Window tray_win, tray_owner;
+static Atom tray_selection;
+static Colormap tray_colormap;
+static int tray_argb, tray_hovered;
+static Window tray_tip;
+static unsigned long tray_foreground = 0xffc4c4c4UL;
+static struct timespec tray_hover_time;
 
 static Notif           notifs[MAX_NOTIFS];
 static uint32_t        next_id = 1;
 static volatile sig_atomic_t running = 1;
+
+static void dnd_set(int state);
 
 /* ---------- utils ---------- */
 
@@ -834,17 +848,18 @@ card(Notif *n, int idx)
 	cui_end_box(ui);
 
 	/* footer: [▶ action] [action] ............ [✕ dismiss] */
-	if ((action_buttons && n->nactions) || dismiss_button) {
+	if (((action_buttons || n->dnd_notice) && n->nactions) || dismiss_button) {
 		if (divider_bottom)
 			hline(ui, divider);
 		cui_begin_box(ui, 0, (cui_box){ .width = -1, .row = true, .gap = 4,
 		                                .align_y = CUI_ALIGN_CENTER });
-		for (int i = 0; action_buttons && i < n->nactions; i++) {
+		for (int i = 0; (action_buttons || n->dnd_notice) && i < n->nactions; i++) {
 			char akey[16];
 			snprintf(akey, sizeof(akey), "a%d", i);
 			if (card_button(akey, n->actions[i].label, i == 0 ? "play" : NULL,
 			                p->accent, alpha(p->accent, 40))) {
-				emit_action(n->id, n->actions[i].key);
+				if (n->dnd_notice) dnd_set(!strcmp(n->actions[i].key, "on"));
+			else emit_action(n->id, n->actions[i].key);
 				dismiss(idx, 2);
 			}
 		}
@@ -910,7 +925,8 @@ card_clicked(Notif *c)
 	for (int i = 0; i < c->nactions && !key; i++)
 		if (!strcmp(c->actions[i].key, "default")) key = c->actions[i].key;
 	if (!key && c->nactions) key = c->actions[0].key;
-	if (key) emit_action(c->id, key);
+	if (key && c->dnd_notice) dnd_set(!strcmp(key, "on"));
+	else if (key) emit_action(c->id, key);
 	dismiss((int)(c - notifs), 2);
 }
 
@@ -1150,10 +1166,236 @@ render(void)
 	}
 	set_shape(w, h);
 	cui_sdl3_render(host, &list, (cui_color){ 0, 0, 0, 0 });
-	cui_sdl3_set_cursor(host, cui_pointer_cursor(ui));
+	cui_sdl3_set_cursor(host, dragging ? CUI_CURSOR_GRABBING : cui_pointer_cursor(ui));
 	/* input of this frame changed the hover state: the next frame reacts */
 	if ((hit(idx, n, pointer_x, pointer_y) != NULL) != hovered || drag)
 		dirty = 1;
+}
+
+/* Schedule intervals belong to their starting day. */
+static int
+scheduled_dnd(void)
+{
+ time_t now = time(NULL);
+ struct tm local;
+ if (!localtime_r(&now, &local)) return 0;
+ int minute = local.tm_hour * 60 + local.tm_min;
+ for (int offset = 0; offset < 2; offset++) {
+  int day = (local.tm_wday + 7 - offset) % 7;
+  const int *v = dnd_schedule[day];
+  if (v[0] < 0 || v[0] > 23 || v[1] < 0 || v[1] > 59 ||
+      v[2] < 0 || v[2] > 23 || v[3] < 0 || v[3] > 59) continue;
+  int start = v[0] * 60 + v[1], end = v[2] * 60 + v[3];
+  if (start == end) continue;
+  if (!offset && minute >= start && (end < start || minute < end)) return 1;
+  if (offset && end < start && minute < end) return 1;
+ }
+ return 0;
+}
+
+static void
+tray_draw(void)
+{
+ if (!tray_win) return;
+ XWindowAttributes a;
+ if (!XGetWindowAttributes(dpy, tray_win, &a)) return;
+ GC gc = XCreateGC(dpy, tray_win, 0, NULL);
+ if (tray_argb) {
+  XSetForeground(dpy, gc, 0);
+  XFillRectangle(dpy, tray_win, gc, 0, 0, a.width, a.height);
+ } else {
+  XSetWindowBackgroundPixmap(dpy, tray_win, ParentRelative);
+  XClearWindow(dpy, tray_win);
+ }
+ XSetForeground(dpy, gc, tray_foreground);
+ int size = (a.width < a.height ? a.width : a.height) - 6;
+ if (size > 14) size = 14;
+ if (size > 2) {
+  XFillArc(dpy, tray_win, gc, (a.width-size)/2, (a.height-size)/2, size, size, 0, 360*64);
+  if (dnd_state) {
+   XSetForeground(dpy, gc, 0);
+   XSetLineAttributes(dpy, gc, 2, LineSolid, CapRound, JoinRound);
+   XDrawLine(dpy, tray_win, gc, (a.width-size)/2+2, (a.height+size)/2-2, (a.width+size)/2-2, (a.height-size)/2+2);
+  }
+ }
+ XFreeGC(dpy, gc);
+ XFlush(dpy);
+}
+
+static void
+tray_tip_hide(void)
+{
+ if (tray_tip) { XDestroyWindow(dpy, tray_tip); tray_tip = 0; }
+}
+
+static void
+tray_tip_show(void)
+{
+ if (!tray_win || tray_tip) return;
+ const char *label = dnd_state ? "Do not disturb: on" : "Do not disturb: off";
+ XFontStruct *font = XLoadQueryFont(dpy, "fixed");
+ int width = (font ? XTextWidth(font, label, (int)strlen(label)) : (int)strlen(label) * 6) + 16;
+ int height = font ? font->ascent + font->descent + 10 : 24;
+ Window child; int x, y;
+ XWindowAttributes a;
+ if (!XGetWindowAttributes(dpy, tray_win, &a) ||
+     !XTranslateCoordinates(dpy, tray_win, root, 0, 0, &x, &y, &child)) {
+  if (font) XFreeFont(dpy, font);
+  return;
+ }
+ y = y + a.height + height <= DisplayHeight(dpy, screen) ? y + a.height : y - height;
+ if (x + width > DisplayWidth(dpy, screen)) x = DisplayWidth(dpy, screen) - width;
+ if (x < 0) x = 0;
+ if (y < 0) y = 0;
+ XSetWindowAttributes attrs = { .override_redirect = True, .background_pixel = BlackPixel(dpy, screen) };
+ tray_tip = XCreateWindow(dpy, root, x, y, width, height, 1, CopyFromParent,
+                          InputOutput, CopyFromParent, CWOverrideRedirect | CWBackPixel, &attrs);
+ XMapRaised(dpy, tray_tip);
+ GC gc = XCreateGC(dpy, tray_tip, 0, NULL);
+ XSetForeground(dpy, gc, WhitePixel(dpy, screen));
+ if (font) XSetFont(dpy, gc, font->fid);
+ XDrawString(dpy, tray_tip, gc, 8, font ? 5 + font->ascent : 16, label, (int)strlen(label));
+ XFreeGC(dpy, gc);
+ if (font) XFreeFont(dpy, font);
+ XFlush(dpy);
+}
+
+/* Schedule notices are local so they remain visible while DND is active. */
+static void
+dnd_schedule_notice(int state)
+{
+ for (int i = 0; i < MAX_NOTIFS; i++)
+  if (notifs[i].active && !notifs[i].closing && notifs[i].dnd_notice) dismiss(i, 3);
+ while (count_active() >= max_visible) {
+  int oldest = find_oldest();
+  if (oldest < 0) break;
+  dismiss(oldest, 2);
+ }
+ int slot = find_free_slot();
+ if (slot < 0) {
+  for (int i = 0; i < MAX_NOTIFS; i++)
+   if (notifs[i].closing) { release(i); slot = i; break; }
+ }
+ if (slot < 0) return;
+ Notif *n = &notifs[slot];
+ memset(n, 0, sizeof(*n));
+ n->id = next_id++;
+ if (!next_id) next_id = 1;
+ n->active = n->fresh = n->dnd_notice = 1;
+ n->app = estrdup("nod");
+ n->summary = estrdup(state ? "Do not disturb is on" : "Do not disturb is off");
+ n->body = estrdup("Changed by your schedule.");
+ n->urgency = 1;
+ n->actions[0].key = estrdup(state ? "off" : "on");
+ n->actions[0].label = estrdup(state ? "Turn off" : "Turn on");
+ n->nactions = 1;
+ n->timeout_ms = timeouts[1] * 1000;
+ clock_gettime(CLOCK_MONOTONIC, &n->created);
+ n->deadline_base = n->created;
+ dirty = 1;
+}
+
+static void
+dnd_update(void)
+{
+ int scheduled = scheduled_dnd();
+ int transition = scheduled != dnd_schedule_state;
+ if (transition) { dnd_schedule_state = scheduled; dnd_override = -1; }
+ int state = dnd_override < 0 ? scheduled : dnd_override;
+ if (state != dnd_state) {
+  dnd_state = state;
+  tray_draw(); tray_tip_hide();
+  if (transition) dnd_schedule_notice(state);
+ }
+}
+
+static void
+dnd_set(int state)
+{
+ dnd_update();
+ dnd_override = !!state;
+ dnd_update();
+}
+
+static void
+dnd_toggle(void)
+{
+ dnd_update();
+ dnd_override = !dnd_state;
+ dnd_update();
+}
+
+/* XEmbed system tray, supported by traditional X11 panels. */
+static void
+tray_update(void)
+{
+ Window owner = XGetSelectionOwner(dpy, tray_selection);
+ if (owner != tray_owner) {
+  tray_owner = owner;
+  tray_tip_hide(); tray_hovered = 0;
+  if (tray_win) { XDestroyWindow(dpy, tray_win); tray_win = 0; }
+  if (tray_colormap) { XFreeColormap(dpy, tray_colormap); tray_colormap = 0; }
+  if (owner) {
+   /* Follow the visual requested by the tray manager, including ARGB trays. */
+   Atom visual_atom = XInternAtom(dpy, "_NET_SYSTEM_TRAY_VISUAL", False), actual;
+   int format; unsigned long count, remaining; unsigned char *property = NULL;
+   XVisualInfo *vi = NULL; int nvi = 0;
+   if (XGetWindowProperty(dpy, owner, visual_atom, 0, 1, False, XA_VISUALID,
+       &actual, &format, &count, &remaining, &property) == Success &&
+       property && actual == XA_VISUALID && format == 32 && count == 1) {
+    XVisualInfo query = { .visualid = *(unsigned long *)property, .screen = screen };
+    vi = XGetVisualInfo(dpy, VisualIDMask | VisualScreenMask, &query, &nvi);
+   }
+   if (property) XFree(property);
+   XRenderPictFormat *pf = vi ? XRenderFindVisualFormat(dpy, vi->visual) : NULL;
+   tray_argb = vi && vi->depth == 32 && pf && pf->type == PictTypeDirect && pf->direct.alphaMask;
+   if (tray_argb) {
+    tray_colormap = XCreateColormap(dpy, root, vi->visual, AllocNone);
+    XSetWindowAttributes attr = { .colormap = tray_colormap, .background_pixel = 0, .border_pixel = 0 };
+    tray_win = XCreateWindow(dpy, root, 0, 0, 24, 24, 0, vi->depth, InputOutput,
+                             vi->visual, CWColormap | CWBackPixel | CWBorderPixel, &attr);
+   } else {
+    tray_win = XCreateSimpleWindow(dpy, root, 0, 0, 24, 24, 0, 0, 0);
+   }
+   if (vi) XFree(vi);
+   /* XEmbed tray foreground is three 16-bit CARDINAL color components. */
+   Atom colors = XInternAtom(dpy, "_NET_SYSTEM_TRAY_COLORS", False);
+   property = NULL;
+   unsigned long red = 0xc4, green = 0xc4, blue = 0xc4;
+   if (XGetWindowProperty(dpy, owner, colors, 0, 12, False, XA_CARDINAL,
+       &actual, &format, &count, &remaining, &property) == Success && property &&
+       actual == XA_CARDINAL && format == 32 && count >= 3) {
+    unsigned long *rgb = (unsigned long *)property;
+    red = (rgb[0] & 0xffff) >> 8; green = (rgb[1] & 0xffff) >> 8; blue = (rgb[2] & 0xffff) >> 8;
+   }
+   if (property) XFree(property);
+   if (tray_argb) tray_foreground = 0xff000000UL | (red << 16) | (green << 8) | blue;
+   else {
+    XColor color = { .red = red * 257, .green = green * 257, .blue = blue * 257, .flags = DoRed | DoGreen | DoBlue };
+    tray_foreground = XAllocColor(dpy, DefaultColormap(dpy, screen), &color) ? color.pixel : WhitePixel(dpy, screen);
+   }
+   XSelectInput(dpy, tray_win, ExposureMask | ButtonPressMask | StructureNotifyMask | EnterWindowMask | LeaveWindowMask);
+   Atom info = XInternAtom(dpy, "_XEMBED_INFO", False);
+   unsigned long data[2] = { 0, 1 };
+   XChangeProperty(dpy, tray_win, info, info, 32, PropModeReplace, (unsigned char *)data, 2);
+   XStoreName(dpy, tray_win, "nod: click to toggle do not disturb");
+   XEvent e = {0}; e.xclient.type = ClientMessage; e.xclient.window = owner;
+   e.xclient.message_type = XInternAtom(dpy, "_NET_SYSTEM_TRAY_OPCODE", False);
+   e.xclient.format = 32; e.xclient.data.l[0] = CurrentTime;
+   e.xclient.data.l[1] = 0; e.xclient.data.l[2] = tray_win;
+   XSendEvent(dpy, owner, False, NoEventMask, &e); XFlush(dpy);
+  }
+ }
+ while (XPending(dpy)) {
+  XEvent e; XNextEvent(dpy, &e);
+  if (e.xany.window != tray_win) continue;
+  if (e.type == Expose || e.type == ConfigureNotify) tray_draw();
+  else if (e.type == EnterNotify) { tray_hovered = 1; clock_gettime(CLOCK_MONOTONIC, &tray_hover_time); }
+  else if (e.type == LeaveNotify) { tray_hovered = 0; tray_tip_hide(); }
+  else if (e.type == ButtonPress && e.xbutton.button == Button1) dnd_toggle();
+  else if (e.type == DestroyNotify) { tray_win = 0; tray_owner = 0; tray_hovered = 0; tray_tip_hide(); }
+ }
+ if (tray_hovered && !tray_tip && ms_since(&tray_hover_time) >= 600) tray_tip_show();
 }
 
 /* ---------- Notify handler ---------- */
@@ -1235,6 +1477,19 @@ handle_notify(DBusMessage *msg)
 
 	(void)app_icon;
 
+	dnd_update();
+	int muted = dnd_state;
+	for (size_t i = 0; i < LEN(dnd_muted_apps); i++)
+		if (dnd_muted_apps[i] && !strcasecmp(app_name, dnd_muted_apps[i])) muted = 1;
+	if (muted) {
+		int old = replaces_id ? find_by_id(replaces_id) : -1;
+		uint32_t id = old >= 0 ? replaces_id : next_id++;
+		if (!next_id) next_id = 1;
+		if (old >= 0) dismiss(old, 3);
+		else suppressed_id = id;
+		return id;
+	}
+
 	/* locate / allocate slot */
 	int slot = -1;
 	int is_replace = 0;
@@ -1298,6 +1553,12 @@ static const char *introspect_xml =
 	"      <arg name=\"data\" direction=\"out\" type=\"s\"/>\n"
 	"    </method>\n"
 	"  </interface>\n"
+	"  <interface name=\"org.nod.Dnd\">\n"
+	"    <method name=\"Toggle\"><arg direction=\"out\" type=\"b\"/></method>\n"
+	"    <method name=\"Status\"><arg direction=\"out\" type=\"b\"/></method>\n"
+	"    <method name=\"On\"><arg direction=\"out\" type=\"b\"/></method>\n"
+	"    <method name=\"Off\"><arg direction=\"out\" type=\"b\"/></method>\n"
+	"  </interface>\n"
 	"  <interface name=\"org.freedesktop.Notifications\">\n"
 	"    <method name=\"GetCapabilities\">\n"
 	"      <arg direction=\"out\" name=\"caps\" type=\"as\"/>\n"
@@ -1349,6 +1610,15 @@ dbus_msg_handler(DBusConnection *c, DBusMessage *msg, void *ud)
 		reply = dbus_message_new_method_return(msg);
 		if (reply) dbus_message_append_args(reply,
 		    DBUS_TYPE_STRING, &introspect_xml, DBUS_TYPE_INVALID);
+	} else if (!strcmp(iface, "org.nod.Dnd")) {
+		if (!strcmp(member, "Toggle")) dnd_toggle();
+		else if (!strcmp(member, "Status")) dnd_update();
+		else if (!strcmp(member, "On") || !strcmp(member, "Off")) {
+			dnd_update(); dnd_override = !strcmp(member, "On"); dnd_update();
+		} else return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+		reply = dbus_message_new_method_return(msg);
+		dbus_bool_t state = dnd_state;
+		if (reply) dbus_message_append_args(reply, DBUS_TYPE_BOOLEAN, &state, DBUS_TYPE_INVALID);
 	} else if (!strcmp(iface, IFACE)) {
 		if (!strcmp(member, "GetCapabilities")) {
 			reply = dbus_message_new_method_return(msg);
@@ -1396,6 +1666,7 @@ dbus_msg_handler(DBusConnection *c, DBusMessage *msg, void *ud)
 		dbus_connection_send(c, reply, NULL);
 		dbus_message_unref(reply);
 	}
+	if (suppressed_id) { emit_closed(suppressed_id, 3); suppressed_id = 0; }
 	return DBUS_HANDLER_RESULT_HANDLED;
 }
 
@@ -1471,6 +1742,11 @@ main(int argc, char *argv[])
 	theme_load();
 	host_create();
 	dbus_init();
+	char tray_name[64];
+	snprintf(tray_name, sizeof(tray_name), "_NET_SYSTEM_TRAY_S%d", screen);
+	tray_selection = XInternAtom(dpy, tray_name, False);
+	dnd_schedule_state = scheduled_dnd(); dnd_state = dnd_schedule_state;
+	tray_update();
 
 	int dfd = -1;
 	if (!dbus_connection_get_unix_fd(dbus, &dfd))
@@ -1480,6 +1756,8 @@ main(int argc, char *argv[])
 	clock_gettime(CLOCK_MONOTONIC, &last_xrm);
 
 	while (running) {
+		dnd_update();
+		tray_update();
 		dbus_connection_read_write(dbus, 0);
 		while (dbus_connection_get_dispatch_status(dbus) == DBUS_DISPATCH_DATA_REMAINS)
 			dbus_connection_dispatch(dbus);
@@ -1532,8 +1810,10 @@ main(int argc, char *argv[])
 		if (xresources_poll_ms > 0 && (timeout < 0 || timeout > xresources_poll_ms))
 			timeout = xresources_poll_ms;
 
-		struct pollfd pfd = { .fd = dfd, .events = POLLIN };
-		if (poll(&pfd, 1, dirty ? 0 : timeout) < 0 && errno != EINTR)
+		if (tray_hovered && !tray_tip && (timeout < 0 || timeout > 100)) timeout = 100;
+		if (timeout < 0 || timeout > 1000) timeout = 1000;
+		struct pollfd pfd[2] = { { .fd = dfd, .events = POLLIN }, { .fd = ConnectionNumber(dpy), .events = POLLIN } };
+		if (poll(pfd, 2, dirty ? 0 : timeout) < 0 && errno != EINTR)
 			break;
 	}
 
@@ -1550,6 +1830,9 @@ main(int argc, char *argv[])
 	free(xrm_last);
 	free(font_name);
 	free(mono_name);
+	tray_tip_hide();
+	if (tray_win) XDestroyWindow(dpy, tray_win);
+	if (tray_colormap) XFreeColormap(dpy, tray_colormap);
 	XCloseDisplay(dpy);
 	return 0;
 }

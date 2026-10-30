@@ -14,7 +14,7 @@ static const int   width        = 500;  /* card width */
 static const int   max_lines    = 5;    /* body is clipped after this many lines */
 static const int   padding      = 14;
 static const int   border_width = 1;
-static const int   border_radius = 8;   /* 0 = square */
+static const int   border_radius = 4;   /* 0 = square */
 static const int   gap_x        = 13;   /* from screen edge */
 static const int   gap_y        = 38;   /* from screen edge */
 static const int   stack_gap    = 10;   /* between stacked cards */
@@ -78,3 +78,19 @@ static const int xresources_poll_ms = 2000;
 /* Timeouts in seconds per urgency: low, normal, critical.
  * 0 = do not auto-dismiss. The timer restarts while the pointer is over a card. */
 static const int timeouts[] = { 5, 10, 0 };
+
+/* DND schedule in local time, Sunday through Saturday. Each row is
+ * {start hour, start minute, end hour, end minute}; -1 disables a day.
+ * Overnight intervals end on the following day. Equal times are disabled.
+ * Example: {19, 0, 6, 0} enables DND from 7pm until 6am the next day. */
+static const int dnd_schedule[7][4] = {
+    {-1, 0, 0, 0}, /* Sunday */
+    {-1, 0, 0, 0}, /* Monday */
+    {-1, 0, 0, 0}, /* Tuesday */
+    {-1, 0, 0, 0}, /* Wednesday */
+    {-1, 0, 0, 0}, /* Thursday */
+    {-1, 0, 0, 0}, /* Friday */
+    {-1, 0, 0, 0}, /* Saturday */
+};
+/* Exact, case-insensitive notification app names muted at all times. */
+static const char *dnd_muted_apps[] = { NULL /* e.g. "Example App" */ };

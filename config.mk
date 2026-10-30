@@ -9,7 +9,7 @@ MANPREFIX = $(PREFIX)/share/man
 CUI = vendor/cui-native
 
 PKG_CONFIG = pkg-config
-PKGS = x11 xrandr xext fontconfig dbus-1 sdl3 freetype2 harfbuzz
+PKGS = x11 xrandr xrender xext fontconfig dbus-1 sdl3 freetype2 harfbuzz
 
 INCS = -I$(CUI)/vendor/include -I$(CUI)/vendor/third_party/clay \
        `$(PKG_CONFIG) --cflags $(PKGS)`

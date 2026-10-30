@@ -22,15 +22,16 @@ notifications.
 - Theming from X resources, falling back to `*.background`, `*.foreground`
   and `*.colorN` — wallpaper palettes (pywal, wallust, …) just work
 - Runtime theme reload (polling or `SIGUSR1`)
+- Scheduled do not disturb, app muting, X11 tray toggle and `nod-dnd` CLI
 
 ## Requirements
 
-- libX11, libXrandr, libXext, fontconfig
+- libX11, libXrandr, libXrender, libXext, fontconfig
 - SDL3 >= 3.2, FreeType, HarfBuzz (for CUI)
 - libdbus-1
 - a running X session
 
-On Arch: `pacman -S libx11 libxrandr libxext fontconfig sdl3 freetype2 harfbuzz dbus`
+On Arch: `pacman -S libx11 libxrandr libxrender libxext fontconfig sdl3 freetype2 harfbuzz dbus`
 
 ## Build
 
@@ -199,3 +200,24 @@ Folded (default when more than one notification is shown):
 ## License
 
 MIT — see `LICENSE`.
+
+### Do not disturb
+
+Click nod's circle icon in an XEmbed system tray to toggle do not disturb.
+A slash means DND is on. The icon appears when an X11 system tray is available.
+From a terminal or script, run `nod-dnd` (toggle), `nod-dnd on`,
+`nod-dnd off`, or `nod-dnd status`; each prints `on` or `off`. The command
+requires `dbus-send` and a running nod daemon.
+
+Edit `dnd_schedule` in `config.h` (or `config.def.h` before generating
+`config.h`) and rebuild. Rows run Sunday through Saturday and contain
+`{ start_hour, start_minute, end_hour, end_minute }` in local time. A start
+hour of -1 disables the row; an end before the start crosses midnight. Equal
+times disable the row. Manual changes last until the scheduled state next
+changes or nod restarts. When the schedule changes the DND state, nod shows a
+notification with a button to reverse it and updates the tray icon. For example, `{ 22, 0, 7, 30 }` on Monday mutes
+from Monday 22:00 until Tuesday 07:30.
+
+Add exact notification app names to `dnd_muted_apps` to mute them at all
+times, independently of DND. Matching ignores case. DND and app muting discard
+new notifications, including critical ones; already displayed cards remain.

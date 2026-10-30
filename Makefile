@@ -48,17 +48,23 @@ install: all
 	chmod 755 $(DESTDIR)$(PREFIX)/bin/nod
 	cp -f nod-send $(DESTDIR)$(PREFIX)/bin
 	chmod 755 $(DESTDIR)$(PREFIX)/bin/nod-send
+	cp -f nod-dnd $(DESTDIR)$(PREFIX)/bin
+	chmod 755 $(DESTDIR)$(PREFIX)/bin/nod-dnd
 	mkdir -p $(DESTDIR)$(MANPREFIX)/man1
 	sed "s/VERSION/$(VERSION)/g" < nod.1      > $(DESTDIR)$(MANPREFIX)/man1/nod.1
 	sed "s/VERSION/$(VERSION)/g" < nod-send.1 > $(DESTDIR)$(MANPREFIX)/man1/nod-send.1
+	cp -f nod-dnd.1 $(DESTDIR)$(MANPREFIX)/man1/nod-dnd.1
 	chmod 644 $(DESTDIR)$(MANPREFIX)/man1/nod.1
 	chmod 644 $(DESTDIR)$(MANPREFIX)/man1/nod-send.1
+	chmod 644 $(DESTDIR)$(MANPREFIX)/man1/nod-dnd.1
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/nod
 	rm -f $(DESTDIR)$(PREFIX)/bin/nod-send
+	rm -f $(DESTDIR)$(PREFIX)/bin/nod-dnd
 	rm -f $(DESTDIR)$(MANPREFIX)/man1/nod.1
 	rm -f $(DESTDIR)$(MANPREFIX)/man1/nod-send.1
+	rm -f $(DESTDIR)$(MANPREFIX)/man1/nod-dnd.1
 
 # refresh vendor/cui-native from a CUI checkout: make update-cui CUI_SRC=~/dev/cui
 update-cui:

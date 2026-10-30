@@ -53,6 +53,14 @@ Timeouts are held while the pointer is over the stack.
 .It Sy Timeout
 Auto-dismiss after the notification's expire time.
 .El
+.Sh DO NOT DISTURB
+A left click on the X11 tray icon toggles do not disturb.
+.Xr nod-dnd 1
+also controls the state from scripts.
+The weekly local-time schedule and always-muted app names are configured in
+.Pa config.h .
+Scheduled state changes show a notification with a button to reverse the change.
+Muted notifications are discarded; currently visible cards remain.
 .Sh SUPPORTED HINTS
 .Bl -tag -width "urgency (byte)  "
 .It Sy urgency No (byte)
@@ -186,6 +194,7 @@ exec dwm
 .Ed
 .Sh SEE ALSO
 .Xr nod-send 1 ,
+.Xr nod-dnd 1 ,
 .Xr notify-send 1 ,
 .Xr gdbus 1
 .Sh AUTHORS

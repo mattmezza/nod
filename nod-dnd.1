@@ -1,0 +1,29 @@
+.Dd October 30, 2026
+.Dt NOD-DND 1
+.Os
+.Sh NAME
+.Nm nod-dnd
+.Nd control nod do not disturb mode
+.Sh SYNOPSIS
+.Nm
+.Op Cm toggle | on | off | status
+.Sh DESCRIPTION
+.Nm
+controls a running
+.Xr nod 1
+on the session D-Bus and prints the resulting state,
+.Sq on
+or
+.Sq off .
+The default command is
+.Cm toggle .
+Manual changes last until the next change in the configured schedule or until
+.Nm nod
+restarts.
+The command requires
+.Xr dbus-send 1 .
+.Sh EXIT STATUS
+.Ex -std
+.Sh SEE ALSO
+.Xr nod 1 ,
+.Xr dbus-send 1
