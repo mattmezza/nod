@@ -10,8 +10,6 @@ ifeq ($(strip $(MAKECMDGOALS)),)
 include $(CUI)/sources.mk
 else ifneq ($(filter-out clean distclean uninstall release site site-build site-check,$(MAKECMDGOALS)),)
 include $(CUI)/sources.mk
-else
--include $(wildcard $(CUI)/sources.mk)
 endif
 
 $(CUI)/sources.mk: cui.lock.mk scripts/fetch-cui.sh
@@ -37,7 +35,12 @@ nod.o: nod.c config.h config.mk
 nod: nod.o $(CUIA)
 	$(CC) -o $@ nod.o $(CUIA) $(LDFLAGS)
 
-$(CUIA): $(CUIOBJ)
+# Config/pin changes must invalidate objects even when using an existing CUI path.
+$(CUIOBJ): config.mk cui.lock.mk
+
+$(CUIA): $(CUIOBJ) cui.lock.mk
+	# Recreate the archive so an upstream update cannot retain removed objects.
+	rm -f $@
 	$(AR) rcs $@ $(CUIOBJ)
 
 # CUI sources, compiled exactly as the bundle's own Makefile does
