@@ -33,4 +33,4 @@ sha256sum "$prefix.tar.gz" > "$prefix.tar.gz.sha256"
 git tag -a "$name" -m "nod $name"
 git push origin HEAD "refs/tags/$name"
 gh release create "$name" "$prefix.tar.gz" "$prefix.tar.gz.sha256" \
-    --verify-tag --title "nod $name" --generate-notes
+    --verify-tag --title "nod $name" --notes-file CHANGELOG.md
