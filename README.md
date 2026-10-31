@@ -9,6 +9,10 @@ notifications.
 
 [spec]: https://specifications.freedesktop.org/notification-spec/notification-spec-latest.html
 
+[Website and interactive demo](https://matteo.merola.co/nod/) ·
+[Documentation](https://matteo.merola.co/nod/docs.html) ·
+[Releases](https://github.com/mattmezza/nod/releases)
+
 ## Features
 
 - Single `nod.c`, single `config.h`, no runtime config
@@ -211,6 +215,21 @@ Folded (default when more than one notification is shown):
 ## License
 
 MIT — see `LICENSE`.
+
+## Website
+
+The static marketing and documentation site is in `web/`. Build it with
+Node.js 24+ and npm:
+
+```sh
+make site
+python3 -m http.server 4173 -d web/dist
+```
+
+Tailwind CSS is compiled locally; the published site has no runtime CSS CDN
+dependency. `.github/workflows/pages.yml` builds and deploys `web/dist` to
+GitHub Pages on changes to the site on `main`. Pull requests build without
+deploying. See `web/README.md` for editing and previewing the site.
 
 ### Do not disturb
 

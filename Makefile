@@ -87,4 +87,8 @@ uninstall:
 release:
 	./scripts/release.sh "$(name)"
 
-.PHONY: all clean distclean install uninstall fetch-cui release
+# Compile Tailwind and copy the static documentation site.
+site site-build:
+	cd web && npm ci && npm run build
+
+.PHONY: all clean distclean install uninstall fetch-cui release site site-build
