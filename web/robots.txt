@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://matteo.merola.co/nod/sitemap.xml

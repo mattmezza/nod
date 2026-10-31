@@ -1,0 +1,12 @@
+document.documentElement.classList.add('js');
+const observer = new IntersectionObserver(entries => { for (const entry of entries) if (entry.isIntersecting) { entry.target.classList.add('visible'); observer.unobserve(entry.target); } }, { threshold: .08 });
+document.querySelectorAll('.reveal').forEach(element => observer.observe(element));
+const deck = document.querySelector('#demo-deck');
+const status = document.querySelector('#demo-status');
+document.querySelector('#expand-demo')?.addEventListener('click', event => { const expanded = deck.classList.toggle('expanded'); event.currentTarget.setAttribute('aria-expanded', expanded); });
+document.querySelectorAll('[data-dismiss]').forEach(button => button.addEventListener('click', () => { button.closest('.notification').classList.add('dismissed'); status.textContent = 'Dismissed. Replay to bring all three cards back.'; }));
+document.querySelectorAll('[data-demo-action]').forEach(button => button.addEventListener('click', () => { button.closest('.notification').classList.add('dismissed'); status.textContent = 'Action invoked · this preview keeps you on the page.'; }));
+document.querySelector('#replay-demo')?.addEventListener('click', () => { deck.querySelectorAll('.notification').forEach(card => card.classList.remove('dismissed')); status.textContent = 'Interactive preview · no desktop permissions needed'; });
+const palettes = { default: ['#0d1117','#e6edf3','#a1aab6','#79c0ff'], warm: ['#211b1a','#f0e5d6','#b9aa9a','#e9ab79'], forest: ['#14201d','#e0eee7','#a1b9ad','#8bc4a1'] };
+document.querySelectorAll('[data-theme]').forEach(button => button.addEventListener('click', () => { document.querySelectorAll('[data-theme]').forEach(other => other.setAttribute('aria-pressed', other === button)); const values = palettes[button.dataset.theme]; ['--card','--card-text','--card-muted','--accent'].forEach((name,i) => document.querySelector('#theme-preview').style.setProperty(name,values[i])); }));
+document.querySelectorAll('[data-copy]').forEach(button => button.addEventListener('click', async () => { try { await navigator.clipboard.writeText(document.getElementById(button.dataset.copy).textContent); button.textContent = 'Copied'; setTimeout(() => button.textContent = 'Copy', 2000); } catch { button.textContent = 'Select text to copy'; } }));

@@ -1,0 +1,1 @@
+{"name":"nod-website","version":"0.1.0","private":true,"scripts":{"build":"node build.mjs","dev":"python3 -m http.server 4173 -d dist"},"devDependencies":{"@tailwindcss/cli":"4.1.18","tailwindcss":"4.1.18"}}
