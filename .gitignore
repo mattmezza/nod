@@ -24,4 +24,8 @@ compile_commands.json
 
 # release tarballs
 nod-*.tar.gz
+nod-*.tar.gz.sha256
 build/
+
+# Downloaded dependency; release source archives include it for offline builds
+/vendor/cui-native/

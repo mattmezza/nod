@@ -1,11 +1,11 @@
 # nod - suckless notification daemon
 
-VERSION = 0.2
+VERSION = 0.1.0
 
 PREFIX    = /usr/local
 MANPREFIX = $(PREFIX)/share/man
 
-# Vendored CUI native source bundle (see README.md, "Updating CUI")
+# Downloaded CUI native source bundle (pinned in cui.lock.mk)
 CUI = vendor/cui-native
 
 PKG_CONFIG = pkg-config

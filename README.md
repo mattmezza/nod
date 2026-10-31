@@ -13,7 +13,7 @@ notifications.
 
 - Single `nod.c`, single `config.h`, no runtime config
 - Native D-Bus — no `herbe` wrapper, no FIFOs
-- Cards drawn with [CUI](https://github.com/mattmezza/cui) (vendored), GPU
+- Cards drawn with [CUI](https://github.com/mattmezza/cui) (downloaded at build time), GPU
   accelerated through SDL3's renderer
 - Header (app, urgency, relative time), summary, body, action buttons — each part toggleable
 - Folding stack that unfolds on hover, animated entrance/exit, swipe to dismiss
@@ -40,33 +40,44 @@ make
 sudo make install
 ```
 
-The first `make` compiles the vendored CUI sources into `build/libcui.a`
-(once); after that only `nod.c` rebuilds. Edit `config.h` (copied from
-`config.def.h`) and run `make` to reconfigure.
+The first `make` downloads and verifies the pinned CUI source archive, generates
+its native bundle, and compiles it into `build/libcui.a`. This bootstrap needs
+`curl`, `sha256sum`, `tar`, and Python 3. Later builds use the local copy and
+only rebuild changed sources. Edit `config.h` (copied from `config.def.h`) and
+run `make` to reconfigure.
 
-## CUI (vendored native bundle)
+## CUI dependency
 
-`vendor/cui-native/` is CUI's *native source bundle* — portable C sources,
-FreeType/HarfBuzz text, bidi and the SDL3 adapter — pinned to the commit in
-`vendor/cui-native/REVISION`. Its starter app, Makefile and fonts are removed:
-nod is the host, `config.mk`/`Makefile` compile the sources listed in
-`vendor/cui-native/sources.mk`, and fonts are resolved through fontconfig.
+`vendor/cui-native/` is generated locally and ignored by Git. `cui.lock.mk`
+pins the upstream commit and archive SHA-256. No globally installed CUI library
+is needed. Run `make fetch-cui` to download it ahead of time; subsequent builds
+work offline. `make distclean` keeps the downloaded dependency.
 
-To update it from a CUI checkout:
+To update CUI, change both pins in `cui.lock.mk`, then run `make distclean`
+and `make`. The downloader verifies the archive before running upstream's
+Python bundle generator. It retains the source bundle's license and dependency
+notices, removing only the unused starter app and fonts (nod uses fontconfig).
+
+Release source archives include the pinned native bundle, so building a release
+tarball needs neither network access nor Python.
+
+## Release
+
+Set `VERSION` in `config.mk`, commit all changes, then run:
 
 ```sh
-git clone https://github.com/mattmezza/cui ~/dev/cui   # once
-make update-cui CUI_SRC=~/dev/cui                     # runs `make native-dist` there
-make distclean all
+make release name=v0.1.0
 ```
 
-To play with CUI on its own, the same bundle builds the upstream starter:
-
-```sh
-cd ~/dev/cui && make native-dist
-tar -xzf build/cui-native.tar.gz -C /tmp && make -C /tmp/cui-native
-/tmp/cui-native/build/native_starter
-```
+The target requires authenticated GitHub CLI (`gh`) and push access to `origin`.
+It checks the version and clean checkout, builds a fresh source extraction,
+checks its version, runs the isolated Xvfb/D-Bus smoke test, and creates
+`nod-0.1.0.tar.gz` with a SHA-256 sidecar.
+It then creates an annotated tag, pushes the commit and tag, and publishes a
+GitHub release containing both files. Release validation also needs `xvfb-run`,
+`xauth`, `dbus-run-session`, `gdbus`, `dbus-send`, and `xrdb`. Your local
+`config.h` is preserved. System libraries remain prerequisites;
+the release is a source distribution, not a standalone binary.
 
 ## Theming via X resources
 

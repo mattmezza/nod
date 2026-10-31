@@ -1,7 +1,24 @@
 # nod - suckless notification daemon
 
+.DEFAULT_GOAL := all
 include config.mk
+include cui.lock.mk
+
+# Remaking this included file restarts make, so the very first build works too.
+# Maintenance/site targets must not trigger a network fetch.
+ifeq ($(strip $(MAKECMDGOALS)),)
 include $(CUI)/sources.mk
+else ifneq ($(filter-out clean distclean uninstall release site site-build site-check,$(MAKECMDGOALS)),)
+include $(CUI)/sources.mk
+else
+-include $(wildcard $(CUI)/sources.mk)
+endif
+
+$(CUI)/sources.mk: cui.lock.mk scripts/fetch-cui.sh
+	./scripts/fetch-cui.sh $(CUI_REVISION) $(CUI_SHA256) $(CUI)
+	touch $@
+
+fetch-cui: $(CUI)/sources.mk
 
 # CUI: portable core + FreeType/HarfBuzz text + bidi + SDL3 renderer
 CUISRC = $(PORTABLE_SOURCES) $(TEXT_SOURCES) $(BIDI_SOURCES) \
@@ -23,7 +40,7 @@ nod: nod.o $(CUIA)
 $(CUIA): $(CUIOBJ)
 	$(AR) rcs $@ $(CUIOBJ)
 
-# vendored sources, compiled exactly as the bundle's own Makefile does
+# CUI sources, compiled exactly as the bundle's own Makefile does
 build/vendor/src/text/cui_text.o: CPPFLAGS += -DCUI_TEXT_BIDI
 build/vendor/src/text/cui_bidi.o: CPPFLAGS += -I$(CUI)/vendor/third_party/sheenbidi/Headers
 build/vendor/third_party/sheenbidi/%.o: CPPFLAGS += -DSB_CONFIG_UNITY \
@@ -66,8 +83,8 @@ uninstall:
 	rm -f $(DESTDIR)$(MANPREFIX)/man1/nod-send.1
 	rm -f $(DESTDIR)$(MANPREFIX)/man1/nod-dnd.1
 
-# refresh vendor/cui-native from a CUI checkout: make update-cui CUI_SRC=~/dev/cui
-update-cui:
-	./scripts/update-cui.sh $(CUI_SRC)
+# Publish a validated source release: make release name=v0.1.0
+release:
+	./scripts/release.sh "$(name)"
 
-.PHONY: all clean distclean install uninstall update-cui
+.PHONY: all clean distclean install uninstall fetch-cui release
