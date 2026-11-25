@@ -1,7 +1,7 @@
 # nod — Pricing and license
 
-Updated: October 31, 2026
-Version: 0.1.0
+Updated: November 25, 2026
+Version: 0.2.0
 
 nod is free and open-source software under the MIT license.
 

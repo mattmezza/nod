@@ -27,6 +27,7 @@ notifications.
   and `*.colorN` — wallpaper palettes (pywal, wallust, …) just work
 - Runtime theme reload (polling or `SIGUSR1`)
 - Scheduled do not disturb, app muting, X11 tray toggle and `nod-dnd` CLI
+- Recent notification history via `mwm-tray notifications`
 
 ## Requirements
 
@@ -70,13 +71,13 @@ tarball needs neither network access nor Python.
 Set `VERSION` in `config.mk`, commit all changes, then run:
 
 ```sh
-make release name=v0.1.0
+make release name=v0.2.0
 ```
 
 The target requires authenticated GitHub CLI (`gh`) and push access to `origin`.
 It checks the version and clean checkout, builds a fresh source extraction,
 checks its version, runs the isolated Xvfb/D-Bus smoke test, and creates
-`nod-0.1.0.tar.gz` with a SHA-256 sidecar.
+`nod-0.2.0.tar.gz` with a SHA-256 sidecar.
 It then creates an annotated tag, pushes the commit and tag, and publishes a
 GitHub release containing both files. Release validation also needs `xvfb-run`,
 `xauth`, `dbus-run-session`, `gdbus`, `dbus-send`, and `xrdb`. Your local
@@ -199,7 +200,7 @@ motion are toggled in `config.h`.
 
 ## What nod does NOT do
 
-Icons. Markup. Sound. History. Runtime config. CLI flags beyond `-v`.
+Icons. Markup. Sound. Runtime config. CLI flags beyond `-v`.
 Focus stealing. Wayland.
 
 If you want those, use `dunst`.
@@ -257,8 +258,9 @@ or expired.
 
 nod keeps the 50 most recent notifications in memory, including notifications
 received during Do Not Disturb. Entries from explicitly muted apps and
-notifications with the `transient` hint are excluded. History is cleared
-when nod exits.
+notifications with the `transient` hint are excluded. Use
+`nod-send --transient` to skip history for a message. History is cleared when
+nod exits.
 
 On the notifications object, `org.nod.History.List` returns newest first as
 `a(utysss)`: notification ID, Unix time in microseconds, urgency, app, summary,

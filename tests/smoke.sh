@@ -41,6 +41,11 @@ call CloseNotification "$id" >/dev/null
 [ "$(./nod-dnd on)" = on ]
 [ "$(./nod-dnd status)" = on ]
 ./nod-send -u critical 'Suppressed during DND' 'Critical notifications respect DND'
+./nod-send --transient 'Transient during DND'
+history=$(gdbus call --session --dest org.freedesktop.Notifications \
+    --object-path /org/freedesktop/Notifications --method org.nod.History.List)
+case "$history" in *'Suppressed during DND'*) ;; *) echo 'Missing notification history'; exit 1 ;; esac
+case "$history" in *'Transient during DND'*) echo 'Stored a transient notification'; exit 1 ;; esac
 [ "$(./nod-dnd)" = off ]
 printf 'nod.background: #102030\nnod.foreground: #ffffff\n' | xrdb -merge
 kill -USR1 "$daemon"

@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.2.0
+
+- Keep the latest 50 notifications in memory, including messages received
+  during Do Not Disturb. Exclude muted apps and transient notifications.
+- Expose recent notifications, dismissal, and Do Not Disturb updates to
+  `mwm-tray notifications` over the session bus.
+- Restore the native tray icon when the mwm applet exits.
+- Support `nod-send --transient` to send a notification outside history.
+
 ## v0.1.0 — 2026-10-31
 
 First release of nod, a suckless-style X11 notification daemon with native

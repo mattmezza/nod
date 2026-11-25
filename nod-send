@@ -10,7 +10,7 @@
 
 set -eu
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 
 print_help() {
 	cat <<'EOF'
@@ -27,7 +27,7 @@ Options:
   -h, --hint=TYPE:NAME:VALUE hint (types: byte, int, boolean, string, double)
   -p, --print-id             print notification id to stdout
   -r, --replace-id=ID        replace an existing notification
-  -e, --transient            ignored (nod doesn't persist)
+  -e, --transient            exclude this notification from history
   -w, --wait                 block until notification is closed
   -A, --action=[NAME=]LABEL  register an action (implicit NAME=default);
                              blocks until dismissed. Invoked key → stdout.
@@ -113,7 +113,7 @@ while [ $# -gt 0 ]; do
 		-h|--hint)        add_hint "${2:-}"; shift 2 ;;
 		-p|--print-id)    print_id=1; shift ;;
 		-r|--replace-id)  replaces="${2:-0}"; shift 2 ;;
-		-e|--transient)   shift ;;    # ignored
+		-e|--transient)   add_hint boolean:transient:true; shift ;;
 		-w|--wait)        wait_mode=1; shift ;;
 		-A|--action)
 			_arg="${2:-}"

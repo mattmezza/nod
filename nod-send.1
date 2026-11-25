@@ -33,7 +33,7 @@ All arguments are
 .Xr notify-send 1 Ns -compatible.
 Flags that
 .Xr nod 1
-does not support (icon, category, transient) are accepted and
+does not support (icon, category) are accepted and
 silently ignored so that scripts written for
 .Xr notify-send 1
 continue to work.
@@ -69,16 +69,17 @@ may be
 .Sy byte , int , uint32 , boolean , double ,
 or
 .Sy string .
-Only
 .Sy urgency
-is meaningfully consumed by
+and
+.Sy transient
+are used by
 .Xr nod 1 .
 .It Fl p , Fl \-print-id
 Print the notification id to standard output after sending.
 .It Fl r , Fl \-replace-id Ns = Ns Ar ID
 Replace an existing notification with the given id.
 .It Fl e , Fl \-transient
-Ignored.
+Exclude this notification from history.
 .It Fl w , Fl \-wait
 Block until the notification is closed.
 .It Fl A , Fl \-action Ns = Ns Oo Ar NAME Ns = Oc Ns Ar LABEL
