@@ -249,5 +249,23 @@ notification with a button to reverse it and updates the tray icon. For example,
 from Monday 22:00 until Tuesday 07:30.
 
 Add exact notification app names to `dnd_muted_apps` to mute them at all
-times, independently of DND. Matching ignores case. DND and app muting discard
-new notifications, including critical ones; already displayed cards remain.
+times, independently of DND. Matching ignores case. DND and app muting suppress
+new banners, including critical ones. Displayed cards remain until dismissed
+or expired.
+
+### Notification history
+
+nod keeps the 50 most recent notifications in memory, including notifications
+received during Do Not Disturb. Entries from explicitly muted apps and
+notifications with the `transient` hint are excluded. History is cleared
+when nod exits.
+
+On the notifications object, `org.nod.History.List` returns newest first as
+`a(utysss)`: notification ID, Unix time in microseconds, urgency, app, summary,
+and body. `Remove(u)` removes one entry and `Clear()` removes all entries.
+`org.nod.History.Changed` and `org.nod.Dnd.Changed` signal state updates without
+including notification content.
+
+Run `mwm-tray notifications` on the same X screen and session bus to use an
+unread bell, recent history panel, and Do Not Disturb toggle. nod's tray icon
+returns when the applet exits. [mwm](https://github.com/mattmezza/mwm)

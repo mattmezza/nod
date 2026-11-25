@@ -39,9 +39,12 @@
 #define LEN(x)       (sizeof(x) / sizeof((x)[0]))
 #define MAX_NOTIFS   32
 #define MAX_ACTIONS  3
+#define HISTORY_LIMIT 50
 #define BUS_NAME     "org.freedesktop.Notifications"
 #define OBJ_PATH     "/org/freedesktop/Notifications"
 #define IFACE        "org.freedesktop.Notifications"
+#define DND_IFACE    "org.nod.Dnd"
+#define HISTORY_IFACE "org.nod.History"
 
 typedef struct {
 	char *key, *label;
@@ -69,6 +72,13 @@ typedef struct {
 	cui_rect rect;            /* last painted card rectangle */
 	cui_id   bid;             /* CUI id of the card body */
 } Notif;
+
+typedef struct {
+	uint32_t id;
+	uint64_t received;
+	uint8_t urgency;
+	char *app, *summary, *body;
+} HistoryEntry;
 
 typedef struct {
 	cui_color bg, fg, accent;
@@ -112,7 +122,7 @@ static DBusConnection *dbus;
 static int dnd_state, dnd_schedule_state, dnd_override = -1;
 static uint32_t suppressed_id;
 static Window tray_win, tray_owner;
-static Atom tray_selection;
+static Atom tray_selection, tray_client;
 static Colormap tray_colormap;
 static int tray_argb, tray_hovered;
 static Window tray_tip;
@@ -120,6 +130,8 @@ static unsigned long tray_foreground = 0xffc4c4c4UL;
 static struct timespec tray_hover_time;
 
 static Notif           notifs[MAX_NOTIFS];
+static HistoryEntry    history[HISTORY_LIMIT];
+static size_t          history_count;
 static uint32_t        next_id = 1;
 static volatile sig_atomic_t running = 1;
 
@@ -682,6 +694,94 @@ free_notif_content(Notif *n)
 }
 
 /* ---------- dbus signal emit ---------- */
+
+static void
+state_changed(const char *interface)
+{
+	DBusMessage *m = dbus_message_new_signal(OBJ_PATH, interface, "Changed");
+	if (!m) return;
+	dbus_connection_send(dbus, m, NULL);
+	dbus_message_unref(m);
+}
+
+static void
+history_drop(size_t index)
+{
+	free(history[index].app);
+	free(history[index].summary);
+	free(history[index].body);
+	--history_count;
+	memmove(history + index, history + index + 1, (history_count-index) * sizeof *history);
+	history[history_count] = (HistoryEntry){0};
+}
+
+static size_t
+history_find(uint32_t id)
+{
+	for (size_t i = 0; i < history_count; ++i)
+		if (history[i].id == id) return i;
+	return history_count;
+}
+
+static char *
+history_text(const char *plain, size_t limit)
+{
+	if (strlen(plain) > limit) {
+		while (((unsigned char)plain[limit] & 0xc0) == 0x80) --limit;
+	} else {
+		return estrdup(plain);
+	}
+	char *bounded = strndup(plain, limit);
+	if (!bounded) die("strndup: out of memory");
+	return bounded;
+}
+
+static void
+history_record(uint32_t id, int urgency, const char *app, const char *summary, const char *body, int transient)
+{
+	size_t previous = history_find(id);
+	if (previous < history_count)
+		history_drop(previous);
+	else if (transient)
+		return;
+	if (!transient) {
+		if (history_count == HISTORY_LIMIT) history_drop(HISTORY_LIMIT-1);
+		memmove(history + 1, history, history_count * sizeof *history);
+		++history_count;
+		struct timespec now = {0};
+		clock_gettime(CLOCK_REALTIME, &now);
+		history[0] = (HistoryEntry){id, (uint64_t)now.tv_sec*1000000 + now.tv_nsec/1000, urgency,
+		                            history_text(app, 128), history_text(summary, 512), history_text(body, 2048)};
+	}
+	state_changed(HISTORY_IFACE);
+}
+
+static DBusMessage *
+history_list(DBusMessage *request)
+{
+	DBusMessage *reply = dbus_message_new_method_return(request);
+	if (!reply) return NULL;
+	DBusMessageIter args, list, entry;
+	dbus_message_iter_init_append(reply, &args);
+	if (!dbus_message_iter_open_container(&args, DBUS_TYPE_ARRAY, "(utysss)", &list))
+		goto failed;
+	for (size_t i = 0; i < history_count; ++i) {
+		const HistoryEntry *n = &history[i];
+		if (!dbus_message_iter_open_container(&list, DBUS_TYPE_STRUCT, NULL, &entry) ||
+		    !dbus_message_iter_append_basic(&entry, DBUS_TYPE_UINT32, &n->id) ||
+		    !dbus_message_iter_append_basic(&entry, DBUS_TYPE_UINT64, &n->received) ||
+		    !dbus_message_iter_append_basic(&entry, DBUS_TYPE_BYTE, &n->urgency) ||
+		    !dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &n->app) ||
+		    !dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &n->summary) ||
+		    !dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &n->body) ||
+		    !dbus_message_iter_close_container(&list, &entry))
+			goto failed;
+	}
+	if (dbus_message_iter_close_container(&args, &list)) return reply;
+failed:
+	dbus_message_unref(reply);
+	return NULL;
+}
 
 static void
 emit_closed(uint32_t id, uint32_t reason)
@@ -1305,6 +1405,7 @@ dnd_update(void)
  if (state != dnd_state) {
   dnd_state = state;
   tray_draw(); tray_tip_hide();
+  state_changed(DND_IFACE);
   if (transition) dnd_schedule_notice(state);
  }
 }
@@ -1329,7 +1430,7 @@ dnd_toggle(void)
 static void
 tray_update(void)
 {
- Window owner = XGetSelectionOwner(dpy, tray_selection);
+ Window owner = XGetSelectionOwner(dpy, tray_client) ? None : XGetSelectionOwner(dpy, tray_selection);
  if (owner != tray_owner) {
   tray_owner = owner;
   tray_tip_hide(); tray_hovered = 0;
@@ -1412,6 +1513,7 @@ handle_notify(DBusMessage *msg)
 	uint32_t replaces_id = 0;
 	int32_t  expire_timeout = -1;
 	int      urgency = 1;
+	int      transient = 0;
 
 	if (dbus_message_iter_get_arg_type(&args) != DBUS_TYPE_STRING) return 0;
 	dbus_message_iter_get_basic(&args, &app_name);
@@ -1457,14 +1559,17 @@ handle_notify(DBusMessage *msg)
 			if (dbus_message_iter_get_arg_type(&de) == DBUS_TYPE_STRING)
 				dbus_message_iter_get_basic(&de, &key);
 			dbus_message_iter_next(&de);
-			if (key && !strcmp(key, "urgency")
-			    && dbus_message_iter_get_arg_type(&de) == DBUS_TYPE_VARIANT) {
+			if (key && dbus_message_iter_get_arg_type(&de) == DBUS_TYPE_VARIANT) {
 				DBusMessageIter var;
 				dbus_message_iter_recurse(&de, &var);
-				if (dbus_message_iter_get_arg_type(&var) == DBUS_TYPE_BYTE) {
+				if (!strcmp(key, "urgency") && dbus_message_iter_get_arg_type(&var) == DBUS_TYPE_BYTE) {
 					uint8_t u = 0;
 					dbus_message_iter_get_basic(&var, &u);
 					if (u <= 2) urgency = u;
+				} else if (!strcmp(key, "transient") && dbus_message_iter_get_arg_type(&var) == DBUS_TYPE_BOOLEAN) {
+					dbus_bool_t value = FALSE;
+					dbus_message_iter_get_basic(&var, &value);
+					transient = value;
 				}
 			}
 			dbus_message_iter_next(&hi);
@@ -1478,15 +1583,26 @@ handle_notify(DBusMessage *msg)
 	(void)app_icon;
 
 	dnd_update();
-	int muted = dnd_state;
+	int muted = 0;
 	for (size_t i = 0; i < LEN(dnd_muted_apps); i++)
 		if (dnd_muted_apps[i] && !strcasecmp(app_name, dnd_muted_apps[i])) muted = 1;
-	if (muted) {
+	if (muted || dnd_state) {
 		int old = replaces_id ? find_by_id(replaces_id) : -1;
-		uint32_t id = old >= 0 ? replaces_id : next_id++;
+		uint32_t id = old >= 0 || (!muted && history_find(replaces_id) < history_count) ? replaces_id : next_id++;
 		if (!next_id) next_id = 1;
 		if (old >= 0) dismiss(old, 3);
 		else suppressed_id = id;
+		if (!muted) {
+			if (transient) {
+				history_record(id, urgency, NULL, NULL, NULL, 1);
+			} else {
+				char *app = strip_markup(app_name), *title = strip_markup(summary), *text = strip_markup(body);
+				history_record(id, urgency, app, title, text, 0);
+				free(app);
+				free(title);
+				free(text);
+			}
+		}
 		return id;
 	}
 
@@ -1539,6 +1655,7 @@ handle_notify(DBusMessage *msg)
 	clock_gettime(CLOCK_MONOTONIC, &n->deadline_base);
 	n->active = 1;
 	dirty = 1;
+	history_record(id, urgency, n->app, n->summary, n->body, transient);
 	return id;
 }
 
@@ -1553,11 +1670,18 @@ static const char *introspect_xml =
 	"      <arg name=\"data\" direction=\"out\" type=\"s\"/>\n"
 	"    </method>\n"
 	"  </interface>\n"
-	"  <interface name=\"org.nod.Dnd\">\n"
+	"  <interface name=\"" DND_IFACE "\">\n"
 	"    <method name=\"Toggle\"><arg direction=\"out\" type=\"b\"/></method>\n"
 	"    <method name=\"Status\"><arg direction=\"out\" type=\"b\"/></method>\n"
 	"    <method name=\"On\"><arg direction=\"out\" type=\"b\"/></method>\n"
 	"    <method name=\"Off\"><arg direction=\"out\" type=\"b\"/></method>\n"
+	"    <signal name=\"Changed\"/>\n"
+	"  </interface>\n"
+	"  <interface name=\"" HISTORY_IFACE "\">\n"
+	"    <method name=\"List\"><arg direction=\"out\" type=\"a(utysss)\"/></method>\n"
+	"    <method name=\"Remove\"><arg direction=\"in\" type=\"u\"/></method>\n"
+	"    <method name=\"Clear\"/>\n"
+	"    <signal name=\"Changed\"/>\n"
 	"  </interface>\n"
 	"  <interface name=\"org.freedesktop.Notifications\">\n"
 	"    <method name=\"GetCapabilities\">\n"
@@ -1610,7 +1734,7 @@ dbus_msg_handler(DBusConnection *c, DBusMessage *msg, void *ud)
 		reply = dbus_message_new_method_return(msg);
 		if (reply) dbus_message_append_args(reply,
 		    DBUS_TYPE_STRING, &introspect_xml, DBUS_TYPE_INVALID);
-	} else if (!strcmp(iface, "org.nod.Dnd")) {
+	} else if (!strcmp(iface, DND_IFACE)) {
 		if (!strcmp(member, "Toggle")) dnd_toggle();
 		else if (!strcmp(member, "Status")) dnd_update();
 		else if (!strcmp(member, "On") || !strcmp(member, "Off")) {
@@ -1619,6 +1743,28 @@ dbus_msg_handler(DBusConnection *c, DBusMessage *msg, void *ud)
 		reply = dbus_message_new_method_return(msg);
 		dbus_bool_t state = dnd_state;
 		if (reply) dbus_message_append_args(reply, DBUS_TYPE_BOOLEAN, &state, DBUS_TYPE_INVALID);
+	} else if (!strcmp(iface, HISTORY_IFACE)) {
+		if (!strcmp(member, "List")) {
+			reply = history_list(msg);
+		} else if (!strcmp(member, "Remove")) {
+			uint32_t id;
+			if (!dbus_message_get_args(msg, NULL, DBUS_TYPE_UINT32, &id, DBUS_TYPE_INVALID))
+				return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+			size_t index = history_find(id);
+			if (index < history_count) {
+				history_drop(index);
+				state_changed(HISTORY_IFACE);
+			}
+			reply = dbus_message_new_method_return(msg);
+		} else if (!strcmp(member, "Clear")) {
+			if (history_count) {
+				while (history_count) history_drop(history_count-1);
+				state_changed(HISTORY_IFACE);
+			}
+			reply = dbus_message_new_method_return(msg);
+		} else {
+			return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+		}
 	} else if (!strcmp(iface, IFACE)) {
 		if (!strcmp(member, "GetCapabilities")) {
 			reply = dbus_message_new_method_return(msg);
@@ -1745,6 +1891,8 @@ main(int argc, char *argv[])
 	char tray_name[64];
 	snprintf(tray_name, sizeof(tray_name), "_NET_SYSTEM_TRAY_S%d", screen);
 	tray_selection = XInternAtom(dpy, tray_name, False);
+	snprintf(tray_name, sizeof(tray_name), "_NOD_TRAY_CLIENT_S%d", screen);
+	tray_client = XInternAtom(dpy, tray_name, False);
 	dnd_schedule_state = scheduled_dnd(); dnd_state = dnd_schedule_state;
 	tray_update();
 
@@ -1819,6 +1967,7 @@ main(int argc, char *argv[])
 
 	for (int i = 0; i < MAX_NOTIFS; i++)
 		if (notifs[i].active) dismiss(i, 3);
+	while (history_count) history_drop(history_count-1);
 
 	if (dbus) {
 		dbus_connection_flush(dbus);
