@@ -1,4 +1,4 @@
-.Dd October 29, 2026
+.Dd November 26, 2026
 .Dt NOD 1
 .Os
 .Sh NAME
@@ -22,9 +22,10 @@ override-redirect X11 window, laid out and painted by the CUI library
 through its SDL3 renderer.
 Only one notification daemon can own that name at a time.
 .Pp
-Configuration is compile-time only: edit
-.Pa config.h
-and rebuild.
+Settings are read from
+.Pa $XDG_CONFIG_HOME/nod/config.ini
+at startup.
+Restart the daemon after editing the file.
 .Sh OPTIONS
 .Bl -tag -width Ds
 .It Fl v
@@ -57,8 +58,18 @@ Auto-dismiss after the notification's expire time.
 A left click on the X11 tray icon toggles do not disturb.
 .Xr nod-dnd 1
 also controls the state from scripts.
-The weekly local-time schedule and always-muted app names are configured in
-.Pa config.h .
+The weekly local-time schedule and always-muted app names are configured
+in the
+.Sy [dnd]
+section of
+.Pa config.ini .
+Set a day to
+.Sy off
+or a range such as
+.Li 22:00-07:30 .
+Add one
+.Sy muted_app
+entry per exact app name.
 Scheduled state changes show a notification with a button to reverse the change.
 Do Not Disturb hides new banners and leaves currently visible cards in place.
 .Sh NOTIFICATION HISTORY
@@ -75,7 +86,7 @@ History is cleared when the daemon exits.
 .It Sy urgency No (byte)
 0 = low, 1 = normal, 2 = critical.
 Selects colors and default timeout from
-.Pa config.h .
+.Pa config.ini .
 .El
 .Pp
 All other hints are ignored.
@@ -107,13 +118,18 @@ Clean up windows, release the D-Bus name, exit.
 Reload colors and font from X resources.
 .El
 .Sh FILES
-.Bl -tag -width "config.def.h "
-.It Pa config.h
+.Bl -tag -width Ds
+.It Pa $XDG_CONFIG_HOME/nod/config.ini
 Per-user appearance, card parts (app name, urgency, time, dividers,
 buttons, border), stacking, motion, timeouts and position.
-Copied from
-.Pa config.def.h
-on first build.
+Defaults to
+.Pa ~/.config/nod/config.ini
+when
+.Ev XDG_CONFIG_HOME
+is unset or empty.
+.It Pa share/nod/config.ini
+Sample under the installation prefix with all built-in defaults.
+Missing settings use the built-in defaults.
 .El
 .Sh COMPOSITING
 With a compositor running,
@@ -133,11 +149,12 @@ rounded-corners-exclude = [ "class_g = 'nod'" ];
 When
 .Sy use_xresources
 is enabled in
-.Pa config.h ,
+.Pa config.ini ,
 .Nm
 reads the following resources at startup.
-Unset resources fall back to the compiled-in defaults from
-.Pa config.h .
+Unset resources fall back to values from
+.Pa config.ini
+or the built-in defaults.
 .Bl -tag -width "nod.background.critical "
 .It Sy nod.font
 Fontconfig pattern for text, e.g.\& Li Noto Sans:size=11 .

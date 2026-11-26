@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.3.0
+
+- Configure notifications with `$XDG_CONFIG_HOME/nod/config.ini` or
+  `~/.config/nod/config.ini`. The included example documents every default.
+- Install or upgrade the static Linux x86_64 and ARM64 release packages
+  with the repository installer.
+
 ## v0.2.0
 
 - Keep the latest 50 notifications in memory, including messages received

@@ -2,7 +2,7 @@
 
 > nod is a free, MIT-licensed, suckless-style notification daemon for X11, written in C11 by Matteo Merola. It implements the Desktop Notifications Specification 1.2 over native D-Bus.
 
-nod renders notifications as folding cards using CUI and SDL3. Features include hover-to-unfold stacks, action buttons, animated entrance and exit, swipe dismissal, focused-monitor selection with XRandR, Xresources colors and fonts with live reload, compile-time configuration in config.h, scheduled do not disturb, app muting, an XEmbed tray toggle, and nod-dnd / nod-send scripts.
+nod renders notifications as folding cards using CUI and SDL3. Features include hover-to-unfold stacks, action buttons, animated entrance and exit, swipe dismissal, focused-monitor selection with XRandR, Xresources colors and fonts with live reload, startup configuration in ${XDG_CONFIG_HOME:-$HOME/.config}/nod/config.ini, scheduled do not disturb, app muting, an XEmbed tray toggle, and nod-dnd / nod-send scripts.
 
 nod targets X11. The mwm tray applet can read the latest 50 notifications from in-memory history, including those received during DND. History excludes transient messages and notifications from muted apps.
 
@@ -11,6 +11,6 @@ nod targets X11. The mwm tray applet can read the latest 50 notifications from i
 - [Installation, configuration, themes, DND, and CLI reference](https://matteo.merola.co/nod/docs.html)
 - [Pricing and license](https://matteo.merola.co/nod/pricing.md)
 - [Source repository](https://github.com/mattmezza/nod)
-- [v0.2.0 release](https://github.com/mattmezza/nod/releases/tag/v0.2.0)
+- [v0.3.0 release](https://github.com/mattmezza/nod/releases/tag/v0.3.0)
 
 Documentation updated November 25, 2026. Repository source and installed manual pages are the authoritative implementation reference.

@@ -3,7 +3,7 @@
 *.a
 nod
 
-# local config (user edits from config.def.h)
+# legacy local config from before v0.3.0
 config.h
 
 # editor / OS cruft

@@ -11,7 +11,7 @@ command -v curl >/dev/null
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 curl --fail --location --retry 3 "https://codeload.github.com/mattmezza/cui/tar.gz/$revision" -o "$tmp/source.tar.gz"
-printf '%s  %s\n' "$checksum" "$tmp/source.tar.gz" | sha256sum --check --status
+printf '%s  %s\n' "$checksum" "$tmp/source.tar.gz" | sha256sum -c - >/dev/null
 mkdir "$tmp/source"
 tar -xzf "$tmp/source.tar.gz" -C "$tmp/source" --strip-components=1
 python3 "$tmp/source/scripts/native_bundle.py" --output "$tmp/native.tar.gz"

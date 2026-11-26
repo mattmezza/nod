@@ -34,10 +34,9 @@
 #include "cui/cui_components.h"
 #include "cui/cui_sdl3.h"
 
-#include "config.h"
+#include "settings.h"
 
 #define LEN(x)       (sizeof(x) / sizeof((x)[0]))
-#define MAX_NOTIFS   32
 #define MAX_ACTIONS  3
 #define HISTORY_LIMIT 50
 #define BUS_NAME     "org.freedesktop.Notifications"
@@ -397,7 +396,7 @@ static void
 theme_load(void)
 {
 	static const char *accent_fallback[] = { "nod.color8", "nod.color4", "nod.color1" };
-	char *rm = use_xresources ? get_resource_manager() : NULL;
+	char *rm = cfg.use_xresources ? get_resource_manager() : NULL;
 	XrmDatabase db = rm ? XrmGetStringDatabase(rm) : NULL;
 	free(rm);
 
@@ -407,21 +406,21 @@ theme_load(void)
 		snprintf(fg, sizeof(fg), "nod.foreground.%s", urgency_names[i]);
 		snprintf(ac, sizeof(ac), "nod.accent.%s", urgency_names[i]);
 		snprintf(bd, sizeof(bd), "nod.border.%s", urgency_names[i]);
-		pal[i].bg     = parse_color(xres(db, bg, "nod.background", NULL), bg_colors[i]);
-		pal[i].fg     = parse_color(xres(db, fg, "nod.foreground", NULL), fg_colors[i]);
-		pal[i].accent = parse_color(xres(db, ac, bd, accent_fallback[i], NULL), accent_colors[i]);
+		pal[i].bg     = parse_color(xres(db, bg, "nod.background", NULL), cfg.bg_colors[i]);
+		pal[i].fg     = parse_color(xres(db, fg, "nod.foreground", NULL), cfg.fg_colors[i]);
+		pal[i].accent = parse_color(xres(db, ac, bd, accent_fallback[i], NULL), cfg.accent_colors[i]);
 	}
-	muted = parse_color(xres(db, "nod.muted", "nod.color8", NULL), muted_color);
+	muted = parse_color(xres(db, "nod.muted", "nod.color8", NULL), cfg.muted_color);
 
 	/* critical cards get a tinted surface so they stand out beyond the border */
-	pal[2].bg = mix(pal[2].bg, pal[2].accent, critical_tint);
+	pal[2].bg = mix(pal[2].bg, pal[2].accent, cfg.critical_tint);
 	for (int i = 0; i < 3; i++) {
 		cui_color ink = luminance(pal[i].bg) > .18f ? (cui_color){ 0, 0, 0, 255 }
 		                                            : (cui_color){ 255, 255, 255, 255 };
-		pal[i].fg     = readable(pal[i].fg, pal[i].bg, ink, min_contrast);
-		pal[i].accent = readable(pal[i].accent, pal[i].bg, pal[i].fg, min_contrast);
+		pal[i].fg     = readable(pal[i].fg, pal[i].bg, ink, cfg.min_contrast);
+		pal[i].accent = readable(pal[i].accent, pal[i].bg, pal[i].fg, cfg.min_contrast);
 	}
-	muted = readable(muted, pal[1].bg, pal[1].fg, min_contrast);
+	muted = readable(muted, pal[1].bg, pal[1].fg, cfg.min_contrast);
 
 	const char *d = xres(db, "Xft.dpi", NULL);
 	dpi = d && atof(d) > 0 ? atof(d) : 96;
@@ -429,8 +428,8 @@ theme_load(void)
 	const char *f;
 	free(font_name);
 	free(mono_name);
-	font_name = estrdup((f = xres(db, "nod.font", NULL)) ? f : font);
-	mono_name = estrdup((f = xres(db, "nod.monoFont", NULL)) ? f : mono_font);
+	font_name = estrdup((f = xres(db, "nod.font", NULL)) ? f : cfg.font);
+	mono_name = estrdup((f = xres(db, "nod.monoFont", NULL)) ? f : cfg.mono_font);
 
 	if (db) XrmDestroyDatabase(db);
 
@@ -527,7 +526,7 @@ host_create(void)
 	}
 
 	ui_font = fonts_open();
-	host = cui_sdl3_create("nod", width, 100, ui_font);
+	host = cui_sdl3_create("nod", cfg.width, 100, ui_font);
 	if (!host) die("cannot create SDL3 window: %s", cui_sdl3_error());
 
 	/* cui_sdl3 owns the only SDL window; turn it into an unmanaged popup. */
@@ -552,7 +551,7 @@ host_create(void)
 	XSync(dpy, False);
 
 	ui = cui_create((cui_config){
-		.width = width, .height = 100,
+		.width = cfg.width, .height = 100,
 		.measure = cui_font_measure,
 		.measure_styled = cui_font_measure_styled,
 		.text_geometry = cui_font_text_geometry,
@@ -582,7 +581,7 @@ theme_reload(void)
 static void
 check_xrm_change(void)
 {
-	if (!use_xresources || xresources_poll_ms <= 0)
+	if (!cfg.use_xresources || cfg.xresources_poll_ms <= 0)
 		return;
 	char *cur = get_resource_manager();
 	if ((cur == NULL) != (xrm_last == NULL) || (cur && strcmp(cur, xrm_last))) {
@@ -623,7 +622,7 @@ set_shape(int w, int h)
 		if (!n->active || n->op < .05f) continue;
 		int x = (int)lroundf(n->rect.x), y = (int)lroundf(n->rect.y);
 		int cw = (int)lroundf(n->rect.w), ch = (int)lroundf(n->rect.h);
-		int r = border_radius, d;
+		int r = cfg.border_radius, d;
 		if (r > cw / 2) r = cw / 2;
 		if (r > ch / 2) r = ch / 2;
 		d = 2 * r;
@@ -814,7 +813,7 @@ emit_action(uint32_t id, const char *key)
 static int
 exit_side(void)
 {
-	return (position == TOP_LEFT || position == BOTTOM_LEFT) ? -1 : 1;
+	return (cfg.position == TOP_LEFT || cfg.position == BOTTOM_LEFT) ? -1 : 1;
 }
 
 /* Signal the close now; the card animates out and is freed by update(). */
@@ -898,41 +897,41 @@ card(Notif *n, int idx)
 	cui_push_id(ui, key);
 	/* outer: animated frame (position, height, inset, opacity), clips content */
 	cui_begin_absolute_box(ui, cui_id_from(ui, "card"), (cui_box){
-		.radius = border_radius, .clip = true,
-		.background = p->bg, .border = p->accent, .border_width = show_border ? border_width : 0,
+		.radius = cfg.border_radius, .clip = true,
+		.background = p->bg, .border = p->accent, .border_width = cfg.show_border ? cfg.border_width : 0,
 		.opacity = n->op, .custom_opacity = true }, n->rect);
 	/* body: always laid out at full width so its natural height is stable */
 	cui_id bid = cui_id_from(ui, "body");
-	cui_begin_box(ui, bid, (cui_box){ .width = width, .padding = padding, .gap = 10,
+	cui_begin_box(ui, bid, (cui_box){ .width = cfg.width, .padding = cfg.padding, .gap = 10,
 	                                  .opacity = n->cop, .custom_opacity = true });
 
 	/* header: ● app • urgency ............ 2m ago */
-	if (show_app || show_urgency || show_time) {
+	if (cfg.show_app || cfg.show_urgency || cfg.show_time) {
 		cui_begin_box(ui, 0, (cui_box){ .width = -1, .row = true, .gap = 6,
 		                                .align_y = CUI_ALIGN_CENTER });
 		cui_begin_box(ui, 0, (cui_box){ .width = 8, .height = 8, .radius = 4,
 		                                .background = p->accent });
 		cui_end_box(ui);
-		if (show_app)
+		if (cfg.show_app)
 			cui_text_ex(ui, cui_string(n->app[0] ? n->app : "notification"), mono_px,
 			            p->accent, 0, monob);
-		if (show_app && show_urgency)
+		if (cfg.show_app && cfg.show_urgency)
 			cui_text_ex(ui, cui_string("\xe2\x80\xa2"), mono_px, muted, 0, mono);
-		if (show_urgency)
+		if (cfg.show_urgency)
 			cui_text_ex(ui, cui_string(urgency_names[n->urgency]),
 			            mono_px, n->urgency == 2 ? p->accent : muted, 0, mono);
 		spacer(ui);
-		if (show_time) {
+		if (cfg.show_time) {
 			rel_time(n, when, sizeof(when));
 			cui_text_ex(ui, cui_string(when), mono_px, muted, 0, mono);
 		}
 		cui_end_box(ui);
-		if (divider_top)
+		if (cfg.divider_top)
 			hline(ui, divider);
 	}
 
 	/* content */
-	float inner = width - 2 * padding; /* fixed width so text wraps */
+	float inner = cfg.width - 2 * cfg.padding; /* fixed width so text wraps */
 	cui_begin_box(ui, 0, (cui_box){ .width = inner, .gap = 4 });
 	if (n->summary[0])
 		cui_text_paragraph_colored(ui, cui_string(n->summary), roundf(font_px * 1.08f), p->fg, 0,
@@ -940,7 +939,7 @@ card(Notif *n, int idx)
 	if (n->body[0]) {
 		float fs = roundf(font_px * .92f), lh = roundf(fs * 1.45f);
 		cui_begin_box(ui, 0, (cui_box){ .width = inner, .clip = true,
-		                                .max_height = max_lines > 0 ? lh * max_lines : 0 });
+		                                .max_height = cfg.max_lines > 0 ? lh * cfg.max_lines : 0 });
 		cui_text_ex(ui, cui_string(n->body), fs, mix(p->fg, p->bg, .15f), lh,
 		            (cui_text_style){ 0 });
 		cui_end_box(ui);
@@ -948,12 +947,12 @@ card(Notif *n, int idx)
 	cui_end_box(ui);
 
 	/* footer: [▶ action] [action] ............ [✕ dismiss] */
-	if (((action_buttons || n->dnd_notice) && n->nactions) || dismiss_button) {
-		if (divider_bottom)
+	if (((cfg.action_buttons || n->dnd_notice) && n->nactions) || cfg.dismiss_button) {
+		if (cfg.divider_bottom)
 			hline(ui, divider);
 		cui_begin_box(ui, 0, (cui_box){ .width = -1, .row = true, .gap = 4,
 		                                .align_y = CUI_ALIGN_CENTER });
-		for (int i = 0; (action_buttons || n->dnd_notice) && i < n->nactions; i++) {
+		for (int i = 0; (cfg.action_buttons || n->dnd_notice) && i < n->nactions; i++) {
 			char akey[16];
 			snprintf(akey, sizeof(akey), "a%d", i);
 			if (card_button(akey, n->actions[i].label, i == 0 ? "play" : NULL,
@@ -964,7 +963,7 @@ card(Notif *n, int idx)
 			}
 		}
 		spacer(ui);
-		if (dismiss_button && card_button("dismiss", "Dismiss", "close", muted, alpha(p->fg, 25)))
+		if (cfg.dismiss_button && card_button("dismiss", "Dismiss", "close", muted, alpha(p->fg, 25)))
 			dismiss(idx, 2);
 		cui_end_box(ui);
 	}
@@ -1063,10 +1062,10 @@ track_pointer(const int *idx, int n)
 			if (!drag) break;
 			if (dragging) {
 				cui_cancel_event_activation(ui, e); /* a swipe is not a click */
-				if (fabsf(drag->swipe) > width * swipe_threshold) {
+				if (fabsf(drag->swipe) > cfg.width * cfg.swipe_threshold) {
 					dismiss((int)(drag - notifs), 2);
 				}
-			} else if (!action_buttons) {
+			} else if (!cfg.action_buttons) {
 				click = drag; /* acted on after the frame, unless a button took it */
 			}
 			drag->swipe = 0;
@@ -1076,7 +1075,7 @@ track_pointer(const int *idx, int n)
 			if (fabsf(v->dx) <= fabsf(v->dy) || !(c = hit(idx, n, v->x, v->y))) break;
 			c->swipe = toward_exit(c->swipe - v->dx * (v->scroll_precise ? 1 : 40));
 			clock_gettime(CLOCK_MONOTONIC, &c->swipe_t);
-			if (fabsf(c->swipe) > width * swipe_threshold) {
+			if (fabsf(c->swipe) > cfg.width * cfg.swipe_threshold) {
 				dismiss((int)(c - notifs), 2);
 			}
 			break;
@@ -1090,7 +1089,7 @@ track_pointer(const int *idx, int n)
 static int
 approach(float *v, float target, float dt, float eps)
 {
-	*v += (target - *v) * (1 - expf(-dt * anim_speed));
+	*v += (target - *v) * (1 - expf(-dt * cfg.anim_speed));
 	if (fabsf(target - *v) < eps) { *v = target; return 0; }
 	return 1;
 }
@@ -1101,44 +1100,44 @@ static float
 update(const int *idx, int n, float dt)
 {
 	float off = 0, total = 0, front_h = 0;
-	int depth = 0, top = position == TOP_LEFT || position == TOP_RIGHT;
+	int depth = 0, top = cfg.position == TOP_LEFT || cfg.position == TOP_RIGHT;
 	int enter_dir = exit_side();
 
 	for (int k = 0; k < n; k++) {
 		Notif *c = &notifs[idx[k]];
-		total += c->h + stack_gap;
+		total += c->h + cfg.stack_gap;
 		if (!c->closing && !front_h) front_h = c->h;
 	}
 
 	for (int k = 0; k < n; k++) {
 		Notif *c = &notifs[idx[k]];
-		int d = depth < max_peek ? depth : max_peek;
+		int d = depth < cfg.max_peek ? depth : cfg.max_peek;
 		float ty, th = c->h, tin = 0, tcop = 1, top_ = 1, tx = 0;
 		float tvis = c->closing ? 0 : 1;
 
 		if (expanded) {
 			ty = off;
-			off += (c->h + stack_gap) * c->vis;
+			off += (c->h + cfg.stack_gap) * c->vis;
 		} else {
-			ty = d * peek;
-			tin = d * peek;
+			ty = d * cfg.peek;
+			tin = d * cfg.peek;
 			if (depth > 0) {
 				th = front_h;     /* behind cards show only their bottom edge */
 				tcop = 0;
-				top_ = depth <= max_peek ? 1 - .12f * depth : 0;
+				top_ = depth <= cfg.max_peek ? 1 - .12f * depth : 0;
 			}
 		}
 		if (!c->closing) depth++;
 
 		int swiping = c == drag || ms_since(&c->swipe_t) < 200;
 		if (!swiping) c->swipe = 0;
-		if (c->closing) { tx = c->exit_dir * (float)width; top_ = 0; }
+		if (c->closing) { tx = c->exit_dir * (float)cfg.width; top_ = 0; }
 		else            tx = c->swipe;
 
 		if (c->fresh && c->h > 0) {  /* first layout: start just off the edge */
 			c->fresh = 0;
 			c->y = ty; c->hcur = th; c->inset = tin; c->cop = tcop;
-			c->x = enter_dir * width * .35f; c->op = 0; c->vis = 0;
+			c->x = enter_dir * cfg.width * .35f; c->op = 0; c->vis = 0;
 		}
 		if (swiping && !c->closing) c->x = tx; /* follow the finger exactly */
 		if (!c->fresh) {
@@ -1157,7 +1156,7 @@ update(const int *idx, int n, float dt)
 		Notif *c = &notifs[idx[k]];
 		float ry = top ? c->y : H - c->y - c->hcur;
 		float in = roundf(c->inset);
-		c->rect = (cui_rect){ roundf(in + c->x), roundf(ry), width - 2 * in,
+		c->rect = (cui_rect){ roundf(in + c->x), roundf(ry), cfg.width - 2 * in,
 		                      c->fresh ? 0 : roundf(c->hcur) };
 	}
 	return H > 1 ? H : 1;
@@ -1197,7 +1196,7 @@ render(void)
 		for (int k = 0; k < n; k++) /* reading: hold every timeout */
 			notifs[idx[k]].deadline_base = now;
 	}
-	expanded = !collapse || live <= 1 || hovered || drag || ms_since(&hover_t) < 400;
+	expanded = !cfg.collapse || live <= 1 || hovered || drag || ms_since(&hover_t) < 400;
 
 	/* keep frames coming while a fold-back is pending */
 	animating = expanded && !hovered && !drag && ms_since(&hover_t) < 400;
@@ -1208,10 +1207,10 @@ render(void)
 	 * lay out again (without advancing time) until heights are stable */
 	for (int pass = 0; pass < 3; pass++) {
 		H = update(idx, n, pass ? 0 : dt);
-		if (!cui_begin_frame(ui, width, H, pass ? 0 : dt)) return;
+		if (!cui_begin_frame(ui, cfg.width, H, pass ? 0 : dt)) return;
 		if (!pass)
 			track_pointer(idx, n);
-		cui_begin_box(ui, rid, (cui_box){ .width = width, .height = H,
+		cui_begin_box(ui, rid, (cui_box){ .width = cfg.width, .height = H,
 		                                  .fixed_width = true, .fixed_height = true });
 		for (int k = n - 1; k >= 0; k--) /* back to front */
 			card(&notifs[idx[k]], idx[k]);
@@ -1237,10 +1236,10 @@ render(void)
 		get_focused_monitor(&mx, &my, &mw, &mh);
 		mon_t = now;
 	}
-	int w = width, h = (int)H;
-	int top = position == TOP_LEFT || position == TOP_RIGHT;
-	int x = (position == TOP_LEFT || position == BOTTOM_LEFT) ? mx + gap_x : mx + mw - gap_x - w;
-	int y = top ? my + gap_y : my + mh - gap_y - h;
+	int w = cfg.width, h = (int)H;
+	int top = cfg.position == TOP_LEFT || cfg.position == TOP_RIGHT;
+	int x = (cfg.position == TOP_LEFT || cfg.position == BOTTOM_LEFT) ? mx + cfg.gap_x : mx + mw - cfg.gap_x - w;
+	int y = top ? my + cfg.gap_y : my + mh - cfg.gap_y - h;
 	if (x != win_x || y != win_y || w != win_w || h != win_h || !shown) {
 		/* one atomic request for the server (no half-moved frame on screen),
 		 * then the same geometry through SDL so its cached size, used by the
@@ -1282,7 +1281,7 @@ scheduled_dnd(void)
  int minute = local.tm_hour * 60 + local.tm_min;
  for (int offset = 0; offset < 2; offset++) {
   int day = (local.tm_wday + 7 - offset) % 7;
-  const int *v = dnd_schedule[day];
+  const int *v = cfg.dnd_schedule[day];
   if (v[0] < 0 || v[0] > 23 || v[1] < 0 || v[1] > 59 ||
       v[2] < 0 || v[2] > 23 || v[3] < 0 || v[3] > 59) continue;
   int start = v[0] * 60 + v[1], end = v[2] * 60 + v[3];
@@ -1333,30 +1332,30 @@ tray_tip_show(void)
 {
  if (!tray_win || tray_tip) return;
  const char *label = dnd_state ? "Do not disturb: on" : "Do not disturb: off";
- XFontStruct *font = XLoadQueryFont(dpy, "fixed");
- int width = (font ? XTextWidth(font, label, (int)strlen(label)) : (int)strlen(label) * 6) + 16;
- int height = font ? font->ascent + font->descent + 10 : 24;
+ XFontStruct *tip_font = XLoadQueryFont(dpy, "fixed");
+ int tip_width = (tip_font ? XTextWidth(tip_font, label, (int)strlen(label)) : (int)strlen(label) * 6) + 16;
+ int height = tip_font ? tip_font->ascent + tip_font->descent + 10 : 24;
  Window child; int x, y;
  XWindowAttributes a;
  if (!XGetWindowAttributes(dpy, tray_win, &a) ||
      !XTranslateCoordinates(dpy, tray_win, root, 0, 0, &x, &y, &child)) {
-  if (font) XFreeFont(dpy, font);
+  if (tip_font) XFreeFont(dpy, tip_font);
   return;
  }
  y = y + a.height + height <= DisplayHeight(dpy, screen) ? y + a.height : y - height;
- if (x + width > DisplayWidth(dpy, screen)) x = DisplayWidth(dpy, screen) - width;
+ if (x + tip_width > DisplayWidth(dpy, screen)) x = DisplayWidth(dpy, screen) - tip_width;
  if (x < 0) x = 0;
  if (y < 0) y = 0;
  XSetWindowAttributes attrs = { .override_redirect = True, .background_pixel = BlackPixel(dpy, screen) };
- tray_tip = XCreateWindow(dpy, root, x, y, width, height, 1, CopyFromParent,
+ tray_tip = XCreateWindow(dpy, root, x, y, tip_width, height, 1, CopyFromParent,
                           InputOutput, CopyFromParent, CWOverrideRedirect | CWBackPixel, &attrs);
  XMapRaised(dpy, tray_tip);
  GC gc = XCreateGC(dpy, tray_tip, 0, NULL);
  XSetForeground(dpy, gc, WhitePixel(dpy, screen));
- if (font) XSetFont(dpy, gc, font->fid);
- XDrawString(dpy, tray_tip, gc, 8, font ? 5 + font->ascent : 16, label, (int)strlen(label));
+ if (tip_font) XSetFont(dpy, gc, tip_font->fid);
+ XDrawString(dpy, tray_tip, gc, 8, tip_font ? 5 + tip_font->ascent : 16, label, (int)strlen(label));
  XFreeGC(dpy, gc);
- if (font) XFreeFont(dpy, font);
+ if (tip_font) XFreeFont(dpy, tip_font);
  XFlush(dpy);
 }
 
@@ -1366,7 +1365,7 @@ dnd_schedule_notice(int state)
 {
  for (int i = 0; i < MAX_NOTIFS; i++)
   if (notifs[i].active && !notifs[i].closing && notifs[i].dnd_notice) dismiss(i, 3);
- while (count_active() >= max_visible) {
+ while (count_active() >= cfg.max_visible) {
   int oldest = find_oldest();
   if (oldest < 0) break;
   dismiss(oldest, 2);
@@ -1389,7 +1388,7 @@ dnd_schedule_notice(int state)
  n->actions[0].key = estrdup(state ? "off" : "on");
  n->actions[0].label = estrdup(state ? "Turn off" : "Turn on");
  n->nactions = 1;
- n->timeout_ms = timeouts[1] * 1000;
+ n->timeout_ms = cfg.timeouts[1] * 1000;
  clock_gettime(CLOCK_MONOTONIC, &n->created);
  n->deadline_base = n->created;
  dirty = 1;
@@ -1584,8 +1583,8 @@ handle_notify(DBusMessage *msg)
 
 	dnd_update();
 	int muted = 0;
-	for (size_t i = 0; i < LEN(dnd_muted_apps); i++)
-		if (dnd_muted_apps[i] && !strcasecmp(app_name, dnd_muted_apps[i])) muted = 1;
+	for (size_t i = 0; i < cfg.muted_count; i++)
+		if (!strcasecmp(app_name, cfg.muted_apps[i])) muted = 1;
 	if (muted || dnd_state) {
 		int old = replaces_id ? find_by_id(replaces_id) : -1;
 		uint32_t id = old >= 0 || (!muted && history_find(replaces_id) < history_count) ? replaces_id : next_id++;
@@ -1614,7 +1613,7 @@ handle_notify(DBusMessage *msg)
 		if (slot >= 0) is_replace = 1;
 	}
 	if (slot < 0) {
-		while (count_active() >= max_visible) {
+		while (count_active() >= cfg.max_visible) {
 			int o = find_oldest();
 			if (o < 0) break;
 			dismiss(o, 2);
@@ -1651,7 +1650,7 @@ handle_notify(DBusMessage *msg)
 		a->label = estrdup(acts[i + 1][0] ? acts[i + 1] : "Open");
 	}
 
-	n->timeout_ms = expire_timeout > 0 ? expire_timeout : timeouts[urgency] * 1000;
+	n->timeout_ms = expire_timeout > 0 ? expire_timeout : cfg.timeouts[urgency] * 1000;
 	clock_gettime(CLOCK_MONOTONIC, &n->deadline_base);
 	n->active = 1;
 	dirty = 1;
@@ -1884,7 +1883,8 @@ main(int argc, char *argv[])
 	have_shape = XShapeQueryExtension(dpy, &sev, &serr);
 	if (!FcInit()) die("cannot initialise fontconfig");
 
-	xrm_last = use_xresources ? get_resource_manager() : NULL;
+	settings_load(dpy, DefaultColormap(dpy, screen));
+	xrm_last = cfg.use_xresources ? get_resource_manager() : NULL;
 	theme_load();
 	host_create();
 	dbus_init();
@@ -1915,7 +1915,7 @@ main(int argc, char *argv[])
 			reload = 0;
 			theme_reload();
 		}
-		if (xresources_poll_ms > 0 && ms_since(&last_xrm) >= xresources_poll_ms) {
+		if (cfg.xresources_poll_ms > 0 && ms_since(&last_xrm) >= cfg.xresources_poll_ms) {
 			clock_gettime(CLOCK_MONOTONIC, &last_xrm);
 			check_xrm_change();
 		}
@@ -1955,8 +1955,8 @@ main(int argc, char *argv[])
 			long left = 16 - ms_since(&last_frame);
 			timeout = left > 0 ? (int)left : 0;
 		}
-		if (xresources_poll_ms > 0 && (timeout < 0 || timeout > xresources_poll_ms))
-			timeout = xresources_poll_ms;
+		if (cfg.xresources_poll_ms > 0 && (timeout < 0 || timeout > cfg.xresources_poll_ms))
+			timeout = cfg.xresources_poll_ms;
 
 		if (tray_hovered && !tray_tip && (timeout < 0 || timeout > 100)) timeout = 100;
 		if (timeout < 0 || timeout > 1000) timeout = 1000;
@@ -1982,6 +1982,7 @@ main(int argc, char *argv[])
 	tray_tip_hide();
 	if (tray_win) XDestroyWindow(dpy, tray_win);
 	if (tray_colormap) XFreeColormap(dpy, tray_colormap);
+	settings_free();
 	XCloseDisplay(dpy);
 	return 0;
 }

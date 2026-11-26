@@ -15,10 +15,9 @@ notifications.
 
 ## Features
 
-- Single `nod.c`, single `config.h`, no runtime config
+- Runtime settings in a single XDG `config.ini`
 - Native D-Bus — no `herbe` wrapper, no FIFOs
-- Cards drawn with [CUI](https://github.com/mattmezza/cui) (downloaded at build time), GPU
-  accelerated through SDL3's renderer
+- Cards drawn with [CUI](https://github.com/mattmezza/cui) and SDL3
 - Header (app, urgency, relative time), summary, body, action buttons — each part toggleable
 - Folding stack that unfolds on hover, animated entrance/exit, swipe to dismiss
 - Multi-monitor aware (follows focused window via XRandR)
@@ -29,16 +28,45 @@ notifications.
 - Scheduled do not disturb, app muting, X11 tray toggle and `nod-dnd` CLI
 - Recent notification history via `mwm-tray notifications`
 
-## Requirements
+## Install from GitHub Releases
+
+On Linux x86_64 or ARM64, the installer can fetch the latest release once
+its binary assets are available.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mattmezza/nod/main/install.sh | sh
+```
+
+Use the same script to upgrade or uninstall.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mattmezza/nod/main/install.sh | sh -s -- upgrade
+curl -fsSL https://raw.githubusercontent.com/mattmezza/nod/main/install.sh | sh -s -- uninstall
+```
+
+The installer checks the archive's SHA-256 checksum and installs `nod`,
+`nod-send`, `nod-dnd`, their man pages, and a sample configuration under `~/.local`. Put
+`~/.local/bin` on your `PATH`. Set `NOD_PREFIX` in the shell running the
+installer to use another absolute prefix, and use the same prefix on upgrade
+and removal. Choose a free prefix if the default paths already contain a
+source or package-manager installation. To select a release, pass its tag
+after `install` or `upgrade`. Restart any running nod process after upgrading.
+
+The prebuilt daemon is statically linked and uses SDL3's software renderer.
+It needs an X11 session, a D-Bus session bus, and fonts discoverable through
+Fontconfig. The companion scripts use `gdbus` and `dbus-send`. The installer
+uses `curl`, `sha256sum`, `tar`, and `flock`.
+
+## Build
+
+Build from source to use SDL3's GPU renderer. Source builds require these
+development headers and libraries.
 
 - libX11, libXrandr, libXrender, libXext, fontconfig
 - SDL3 >= 3.2, FreeType, HarfBuzz (for CUI)
 - libdbus-1
-- a running X session
 
-On Arch: `pacman -S libx11 libxrandr libxrender libxext fontconfig sdl3 freetype2 harfbuzz dbus`
-
-## Build
+On Arch, install them with `pacman -S libx11 libxrandr libxrender libxext fontconfig sdl3 freetype2 harfbuzz dbus`.
 
 ```sh
 make
@@ -48,8 +76,26 @@ sudo make install
 The first `make` downloads and verifies the pinned CUI source archive, generates
 its native bundle, and compiles it into `build/libcui.a`. This bootstrap needs
 `curl`, `sha256sum`, `tar`, and Python 3. Later builds use the local copy and
-only rebuild changed sources. Edit `config.h` (copied from `config.def.h`) and
-run `make` to reconfigure.
+only rebuild changed sources.
+
+## Configuration
+
+Nod reads `${XDG_CONFIG_HOME:-$HOME/.config}/nod/config.ini` at startup.
+[config.ini](config.ini) documents every setting and supplies the built-in
+defaults. Copy it to your config directory, edit it, and restart nod.
+
+```sh
+config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/nod"
+mkdir -p "$config_dir"
+cp -n config.ini "$config_dir/config.ini"
+```
+
+Installed copies of the sample live at `share/nod/config.ini` under the
+installation prefix. Missing settings use the built-in defaults. Nod reports
+invalid entries to stderr and continues with the valid settings. If you
+previously customized `config.h`, transfer those values into the matching
+INI sections. Keep only the keys you want to override if you want later
+releases to supply the other defaults.
 
 ## CUI dependency
 
@@ -68,21 +114,26 @@ tarball needs neither network access nor Python.
 
 ## Release
 
-Set `VERSION` in `config.mk`, commit all changes, then run:
+Set `VERSION` in `config.mk` and `nod-send`, then commit the changes and
+run the release target.
 
 ```sh
-make release name=v0.2.0
+make release name=vX.Y.Z
 ```
 
 The target requires authenticated GitHub CLI (`gh`) and push access to `origin`.
 It checks the version and clean checkout, builds a fresh source extraction,
 checks its version, runs the isolated Xvfb/D-Bus smoke test, and creates
-`nod-0.2.0.tar.gz` with a SHA-256 sidecar.
+`nod-X.Y.Z.tar.gz` with a SHA-256 sidecar.
 It then creates an annotated tag, pushes the commit and tag, and publishes a
 GitHub release containing both files. Release validation also needs `xvfb-run`,
-`xauth`, `dbus-run-session`, `gdbus`, `dbus-send`, and `xrdb`. Your local
-`config.h` is preserved. System libraries remain prerequisites;
-the release is a source distribution, not a standalone binary.
+`xauth`, `dbus-run-session`, `gdbus`, `dbus-send`, and `xrdb`.
+
+When the release is published, GitHub Actions builds the tagged commit on
+Linux x86_64 and ARM64. It checks both executables for dynamic dependencies,
+runs the Xvfb/D-Bus smoke test, and attaches the
+`nod-linux-{x86_64,aarch64}.tar.gz` archives and their `.sha256` files to
+that release. The installer can fetch the binaries once this workflow finishes.
 
 ## Theming via X resources
 
@@ -95,7 +146,7 @@ With `use_xresources = 1` (default) nod reads, per urgency
 | text | `nod.foreground.<u>` | `nod.foreground`, `*.foreground` |
 | border, dot, buttons | `nod.accent.<u>` | `nod.border.<u>`, `*.color8` / `*.color4` / `*.color1` |
 | secondary text | `nod.muted` | `*.color8` |
-| fonts | `nod.font`, `nod.monoFont` | `config.h` |
+| fonts | `nod.font`, `nod.monoFont` | `[theme]` in `config.ini` |
 
 Font sizes in points are resolved at `Xft.dpi` (96 when unset), like Xft.
 Accent, text and muted colours are nudged towards the foreground until they
@@ -196,11 +247,11 @@ There is also an isolated Xephyr test for X resources reload:
 - **Timeout** — auto-dismiss
 
 Card parts (app name, urgency, time, dividers, buttons, border), stacking and
-motion are toggled in `config.h`.
+motion are configured in `config.ini`.
 
 ## What nod does NOT do
 
-Icons. Markup. Sound. Runtime config. CLI flags beyond `-v`.
+Icons. Markup. Sound. CLI flags beyond `-v`.
 Focus stealing. Wayland.
 
 If you want those, use `dunst`.
@@ -240,17 +291,15 @@ From a terminal or script, run `nod-dnd` (toggle), `nod-dnd on`,
 `nod-dnd off`, or `nod-dnd status`; each prints `on` or `off`. The command
 requires `dbus-send` and a running nod daemon.
 
-Edit `dnd_schedule` in `config.h` (or `config.def.h` before generating
-`config.h`) and rebuild. Rows run Sunday through Saturday and contain
-`{ start_hour, start_minute, end_hour, end_minute }` in local time. A start
-hour of -1 disables the row; an end before the start crosses midnight. Equal
-times disable the row. Manual changes last until the scheduled state next
+Set days in the `[dnd]` section of `config.ini` and restart nod. Use `off` or
+`HH:MM-HH:MM` in local time. An end before the start crosses midnight. Equal
+times disable the interval. Manual changes last until the scheduled state next
 changes or nod restarts. When the schedule changes the DND state, nod shows a
-notification with a button to reverse it and updates the tray icon. For example, `{ 22, 0, 7, 30 }` on Monday mutes
-from Monday 22:00 until Tuesday 07:30.
+notification with a button to reverse it and updates the tray icon.
+`monday = 22:00-07:30` mutes from Monday 22:00 until Tuesday 07:30.
 
-Add exact notification app names to `dnd_muted_apps` to mute them at all
-times, independently of DND. Matching ignores case. DND and app muting suppress
+Add one `muted_app = App Name` entry per app in `[dnd]` to mute it at all times.
+Matching uses exact app names and ignores case. DND and app muting suppress
 new banners, including critical ones. Displayed cards remain until dismissed
 or expired.
 

@@ -26,14 +26,18 @@ CUIA   = build/libcui.a
 
 all: nod
 
-config.h:
-	cp config.def.h $@
+build/default-config.h: config.ini
+	mkdir -p $(dir $@)
+	od -An -v -tu1 $< | awk '{ for (i = 1; i <= NF; i++) printf "%s,", $$i; print "" }' > $@
 
-nod.o: nod.c config.h config.mk
+nod.o: nod.c settings.h config.mk
 	$(CC) -c $(CFLAGS) nod.c
 
-nod: nod.o $(CUIA)
-	$(CC) -o $@ nod.o $(CUIA) $(LDFLAGS)
+settings.o: settings.c settings.h build/default-config.h config.mk
+	$(CC) -c $(CFLAGS) settings.c
+
+nod: nod.o settings.o $(CUIA)
+	$(CC) -o $@ nod.o settings.o $(CUIA) $(LDFLAGS)
 
 # Config/pin changes must invalidate objects even when using an existing CUI path.
 $(CUIOBJ): config.mk cui.lock.mk
@@ -57,10 +61,10 @@ build/%.o: $(CUI)/%.c
 	@$(CC) $(CFLAGS) $(CPPFLAGS) -O2 $(WNO) -c $< -o $@
 
 clean:
-	rm -f nod nod.o
+	rm -f nod nod.o settings.o
 
 distclean: clean
-	rm -rf build config.h
+	rm -rf build
 
 install: all
 	mkdir -p $(DESTDIR)$(PREFIX)/bin
@@ -77,6 +81,9 @@ install: all
 	chmod 644 $(DESTDIR)$(MANPREFIX)/man1/nod.1
 	chmod 644 $(DESTDIR)$(MANPREFIX)/man1/nod-send.1
 	chmod 644 $(DESTDIR)$(MANPREFIX)/man1/nod-dnd.1
+	mkdir -p $(DESTDIR)$(PREFIX)/share/nod
+	cp -f config.ini $(DESTDIR)$(PREFIX)/share/nod/config.ini
+	chmod 644 $(DESTDIR)$(PREFIX)/share/nod/config.ini
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/nod
@@ -85,6 +92,7 @@ uninstall:
 	rm -f $(DESTDIR)$(MANPREFIX)/man1/nod.1
 	rm -f $(DESTDIR)$(MANPREFIX)/man1/nod-send.1
 	rm -f $(DESTDIR)$(MANPREFIX)/man1/nod-dnd.1
+	rm -f $(DESTDIR)$(PREFIX)/share/nod/config.ini
 
 # Publish a validated source release: make release name=v0.1.0
 release:
